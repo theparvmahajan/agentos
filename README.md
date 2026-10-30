@@ -6,7 +6,7 @@ and exposes everything through a live dashboard.
 
 > The model decides what it wants to do; the runtime decides whether it can.
 
-**Status:** Milestone 0 (setup). See [docs/ROADMAP.md](docs/ROADMAP.md).
+**Status:** Milestone 1 (walking skeleton) in progress. See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Quick start
 ```bash
