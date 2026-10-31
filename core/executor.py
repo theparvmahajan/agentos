@@ -6,6 +6,7 @@ from core.dag import topological_order
 from core.db import get_conn
 from core.llm import LLMProvider
 from core.models import Mission, MissionStatus, Task, TaskStatus
+from core.readiness import nodes_from_tasks, plan_next
 from core.runner import DependencyOutput, Runner
 from core.tools import ToolRegistry
 
@@ -68,17 +69,24 @@ def execute_mission(
     graph = {str(t.id): {str(d) for d in t.depends_on} for t in tasks}
     order = [by_id[UUID(node)] for node in topological_order(graph)]
 
-    status: dict[UUID, TaskStatus] = {}
+    status: dict[UUID, TaskStatus] = {t.id: TaskStatus.PENDING for t in tasks}
     outputs: dict[UUID, str] = {}
     errors: dict[UUID, str] = {}
 
-    for task in order:
-        if any(status[d] != TaskStatus.COMPLETED for d in task.depends_on):
-            _set_task(database_url, task.id, TaskStatus.SKIPPED)
-            status[task.id] = TaskStatus.SKIPPED
-            log.info("task %s skipped (a dependency did not complete)", task.key)
-            continue
+    while True:
+        decision = plan_next(nodes_from_tasks(tasks, status))
 
+        for task_id in decision.skip:
+            _set_task(database_url, task_id, TaskStatus.SKIPPED)
+            status[task_id] = TaskStatus.SKIPPED
+            log.info("task %s skipped (a dependency did not complete)", by_id[task_id].key)
+
+        if decision.finished:
+            break
+        if not decision.ready:  # cannot happen: nothing is in flight between iterations
+            raise RuntimeError("no task is ready but the mission is not finished")
+
+        task = by_id[decision.ready[0]]  # sequential: one task at a time
         _set_task(database_url, task.id, TaskStatus.READY)
         _set_task(database_url, task.id, TaskStatus.RUNNING)
         log.info("task %s running", task.key)
