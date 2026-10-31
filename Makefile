@@ -1,4 +1,4 @@
-.PHONY: up down run test lint migrate seed
+.PHONY: up down run test lint migrate seed serve
 up:
 	docker compose up -d
 down:
@@ -13,3 +13,5 @@ migrate:
 	python -m scripts.migrate
 seed:
 	python -m scripts.seed_agents
+serve:
+	uvicorn services.api.main:app --port 8000
