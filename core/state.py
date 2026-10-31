@@ -1,4 +1,5 @@
-from core.models import MissionStatus, TaskStatus as T
+from core.models import MissionStatus
+from core.models import TaskStatus as T
 
 TASK_TRANSITIONS: dict[T, set[T]] = {
     T.PENDING: {T.READY, T.SKIPPED, T.CANCELLED},
