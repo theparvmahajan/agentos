@@ -7,8 +7,8 @@ from core.config import settings
 MIGRATIONS_DIR = pathlib.Path("infrastructure/db/migrations")
 
 
-def main() -> None:
-    with psycopg.connect(settings.database_url) as conn:
+def run(database_url: str) -> None:
+    with psycopg.connect(database_url) as conn:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -28,6 +28,10 @@ def main() -> None:
 
         conn.commit()
     print("migrations up to date")
+
+
+def main() -> None:
+    run(settings.database_url)
 
 
 if __name__ == "__main__":
