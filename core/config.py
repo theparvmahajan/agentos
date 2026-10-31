@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     openai_base_url: str = ""
     openai_api_key: str = ""
+    tavily_api_key: str = "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"
 
 
 settings = Settings()
