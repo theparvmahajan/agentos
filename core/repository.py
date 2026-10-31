@@ -4,12 +4,18 @@ from uuid import UUID
 import psycopg
 
 from core.models import (
-    Agent, Mission, MissionStatus, Task, TaskStatus,
+    Agent,
+    Mission,
+    MissionStatus,
+    Task,
+    TaskStatus,
 )
 from core.state import (
-    MISSION_TERMINAL, TASK_TERMINAL, InvalidTransition, allowed_sources,
+    MISSION_TERMINAL,
+    TASK_TERMINAL,
+    InvalidTransition,
+    allowed_sources,
 )
-
 
 # ---------- agents ----------
 
