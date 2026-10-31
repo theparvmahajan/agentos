@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from core import repository as repo
 from core.dag import CycleError, topological_order
 from core.db import get_conn
+from core.jsonutil import JSONExtractError, extract_json
 from core.llm import LLMProvider, TaskType, generate
 from core.models import Agent, MissionStatus, Task
 
@@ -69,25 +70,12 @@ def build_system_prompt(agents: list[Agent]) -> str:
     )
 
 
-def _extract_json(text: str) -> object:
-    text = text.strip()
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Models sometimes wrap JSON in ```fences``` or add a sentence around it.
-    start, end = text.find("{"), text.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            pass
-    raise PlanValidationError("output was not valid JSON")
-
-
 def parse_plan(text: str, agent_names: set[str]) -> Plan:
     """Parse and fully validate model output. Returns tasks in dependency order."""
-    data = _extract_json(text)
+    try:
+        data = extract_json(text)
+    except JSONExtractError as e:
+        raise PlanValidationError("output was not valid JSON") from e
 
     try:
         plan = Plan.model_validate(data)
