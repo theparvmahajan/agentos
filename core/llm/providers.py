@@ -16,6 +16,9 @@ def _post_json(
         resp = client.post(url, json=payload, headers=headers)
         resp.raise_for_status()
         return resp.json()
+    except httpx.HTTPStatusError as e:
+        body = " ".join(e.response.text.split())[:300] or "no response body"
+        raise LLMError(f"{name} returned HTTP {e.response.status_code}: {body}") from e
     except httpx.HTTPError as e:
         raise LLMError(f"{name} request failed: {e}") from e
     except ValueError as e:
