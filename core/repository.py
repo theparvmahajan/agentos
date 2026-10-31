@@ -43,6 +43,10 @@ def get_agent_by_name(conn: psycopg.Connection, name: str) -> Agent | None:
     return Agent(**row) if row else None
 
 
+def list_agents(conn: psycopg.Connection) -> list[Agent]:
+    rows = conn.execute("SELECT * FROM agents ORDER BY name").fetchall()
+    return [Agent(**r) for r in rows]
+
 # ---------- missions ----------
 
 def create_mission(
