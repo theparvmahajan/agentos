@@ -1,4 +1,4 @@
-.PHONY: up down run test lint
+.PHONY: up down run test lint migrate
 up:
 	docker compose up -d
 down:
@@ -9,3 +9,5 @@ test:
 	pytest -q
 lint:
 	ruff check .
+migrate:
+	python -m scripts.migrate
