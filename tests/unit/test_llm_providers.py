@@ -128,3 +128,51 @@ def test_openai_compatible_bad_status_becomes_llm_error():
     )
     with pytest.raises(LLMError):
         call(provider)
+
+# ---------- error messages explain what went wrong ----------
+
+def test_http_errors_include_the_status_and_the_servers_explanation():
+    provider = OllamaProvider(
+        "http://ollama.test",
+        client=client_for(
+            lambda r: httpx.Response(
+                500, json={"error": "model runner has unexpectedly stopped"}
+            )
+        ),
+    )
+    with pytest.raises(LLMError) as exc:
+        call(provider)
+    assert "HTTP 500" in str(exc.value)
+    assert "model runner has unexpectedly stopped" in str(exc.value)
+
+
+def test_openai_compatible_errors_include_the_servers_explanation():
+    provider = OpenAICompatibleProvider(
+        "http://api.test/v1",
+        "k",
+        client=client_for(
+            lambda r: httpx.Response(401, json={"error": {"message": "invalid api key"}})
+        ),
+    )
+    with pytest.raises(LLMError) as exc:
+        call(provider)
+    assert "HTTP 401" in str(exc.value)
+    assert "invalid api key" in str(exc.value)
+
+
+def test_long_or_empty_error_bodies_are_handled():
+    long_body = OllamaProvider(
+        "http://ollama.test",
+        client=client_for(lambda r: httpx.Response(500, text="x\n\n  y " * 2000)),
+    )
+    with pytest.raises(LLMError) as exc:
+        call(long_body)
+    assert len(str(exc.value)) < 400
+    assert "\n" not in str(exc.value)
+
+    empty_body = OllamaProvider(
+        "http://ollama.test", client=client_for(lambda r: httpx.Response(502))
+    )
+    with pytest.raises(LLMError) as exc:
+        call(empty_body)
+    assert "no response body" in str(exc.value)

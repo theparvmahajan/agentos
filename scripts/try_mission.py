@@ -1,10 +1,10 @@
-import logging
 import sys
 
 from agents import build_default_runners
 from core import repository as repo
 from core.db import get_conn
 from core.executor import execute_mission
+from core.logging_setup import configure_logging
 from core.planner import run_planner
 from core.tools import build_default_registry
 
@@ -12,7 +12,7 @@ DEFAULT = "Compare PostgreSQL and MySQL for a small startup and summarize the tr
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
+    configure_logging()
     objective = " ".join(sys.argv[1:]) or DEFAULT
 
     with get_conn() as conn:
