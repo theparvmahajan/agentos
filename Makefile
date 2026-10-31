@@ -1,4 +1,4 @@
-.PHONY: up down run test lint migrate
+.PHONY: up down run test lint migrate seed
 up:
 	docker compose up -d
 down:
@@ -11,3 +11,5 @@ lint:
 	ruff check .
 migrate:
 	python -m scripts.migrate
+seed:
+	python -m scripts.seed_agents
