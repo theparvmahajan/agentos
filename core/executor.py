@@ -7,6 +7,7 @@ from core.db import get_conn
 from core.llm import LLMProvider
 from core.models import Mission, MissionStatus, Task, TaskStatus
 from core.readiness import nodes_from_tasks, plan_next
+from core.results import compose_result, describe_failure
 from core.runner import DependencyOutput, Runner
 from core.tools import ToolRegistry
 
@@ -30,15 +31,6 @@ def _finish(
 ) -> Mission:
     with get_conn(database_url) as conn:
         return repo.set_mission_status(conn, mission_id, status, **kwargs)
-
-
-def compose_result(ordered: list[Task], outputs: dict[UUID, str]) -> str:
-    """A mission's result is the output of the tasks nothing else depends on."""
-    depended_on = {d for t in ordered for d in t.depends_on}
-    sinks = [t for t in ordered if t.id not in depended_on]
-    if len(sinks) == 1:
-        return outputs[sinks[0].id]
-    return "\n\n".join(f"## {t.key}\n{outputs[t.id]}" for t in sinks)
 
 
 def execute_mission(
@@ -130,9 +122,6 @@ def execute_mission(
             database_url, mission_id, MissionStatus.COMPLETED, result=compose_result(order, outputs)
         )
 
-    detail = "; ".join(f"{t.key}: {_clip(errors[t.id])}" for t in failed)
-    message = f"{len(failed)} task(s) failed ({detail})"
-    if skipped:
-        message += f"; skipped: {', '.join(t.key for t in skipped)}"
+    message = describe_failure(failed, skipped, errors)
     log.warning("mission %s failed: %s", mission_id, message)
     return _finish(database_url, mission_id, MissionStatus.FAILED, error=message)
