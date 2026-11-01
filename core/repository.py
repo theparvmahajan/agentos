@@ -218,3 +218,13 @@ def finish_mission_if_running(
         (status.value, result, error, mission_id),
     ).fetchone()
     return Mission(**row) if row else None
+
+
+def get_task(conn: psycopg.Connection, task_id: UUID) -> Task | None:
+    row = conn.execute("SELECT * FROM tasks WHERE id = %s", (task_id,)).fetchone()
+    if row is None:
+        return None
+    deps = conn.execute(
+        "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = %s", (task_id,)
+    ).fetchall()
+    return Task(**row, depends_on=[d["depends_on_task_id"] for d in deps])
