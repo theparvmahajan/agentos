@@ -1,4 +1,4 @@
-.PHONY: up down run test lint migrate seed serve scheduler
+.PHONY: up down run test lint migrate seed serve scheduler worker
 up:
 	docker compose up -d
 down:
@@ -17,3 +17,5 @@ serve:
 	uvicorn services.api.main:app --port 8000
 scheduler:
 	python -m services.scheduler
+worker:
+	python -m services.worker
