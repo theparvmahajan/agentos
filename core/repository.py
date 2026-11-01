@@ -193,3 +193,28 @@ def set_task_status(
         raise InvalidTransition(f"task {task_id}: {current['status']} -> {new_status.value}")
 
     return Task(**row, depends_on=[])
+
+
+def finish_mission_if_running(
+    conn: psycopg.Connection,
+    mission_id: UUID,
+    status: MissionStatus,
+    *,
+    result: str | None = None,
+    error: str | None = None,
+) -> Mission | None:
+    """Finish a mission exactly once. Returns None if it was no longer running.
+
+    The status check and the write are one UPDATE, so if two schedulers both decide the
+    mission is over, only one of them wins.
+    """
+    row = conn.execute(
+        """
+        UPDATE missions
+        SET status = %s, result = %s, error = %s, updated_at = now(), completed_at = now()
+        WHERE id = %s AND status = 'running'
+        RETURNING *
+        """,
+        (status.value, result, error, mission_id),
+    ).fetchone()
+    return Mission(**row) if row else None
