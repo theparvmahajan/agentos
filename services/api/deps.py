@@ -5,11 +5,10 @@ from uuid import UUID
 
 from fastapi import Depends
 
-from agents import build_default_runners
-from core.pipeline import process_mission
-from core.tools import build_default_registry
+from core.pipeline import plan_and_publish
+from core.queue import build_queues
 
-Processor = Callable[[UUID], None]
+Launcher = Callable[[UUID], None]
 
 
 def get_database_url() -> str | None:
@@ -18,18 +17,17 @@ def get_database_url() -> str | None:
 
 
 @lru_cache
-def _default_processor() -> Processor:
-    # Built once and shared: the tool registry holds an HTTP client that is safe to reuse.
-    return partial(
-        process_mission, runners=build_default_runners(), tools=build_default_registry()
-    )
+def _default_launcher() -> Launcher:
+    # Built once and shared. The API only plans: workers run the tasks, so the API process
+    # needs no agents and no tools, just the LLM (for planning) and Redis (to wake the scheduler).
+    return partial(plan_and_publish, queues=build_queues())
 
 
-def get_processor() -> Processor:
-    """What runs a mission in the background. Tests override this with a recorder."""
-    return _default_processor()
+def get_launcher() -> Launcher:
+    """What starts a mission in the background. Tests override this with a recorder."""
+    return _default_launcher()
 
 
-# Use these in endpoint signatures: `database_url: DatabaseUrl`, `processor: ProcessorDep`.
+# Use these in endpoint signatures: `database_url: DatabaseUrl`, `launcher: LauncherDep`.
 DatabaseUrl = Annotated[str | None, Depends(get_database_url)]
-ProcessorDep = Annotated[Processor, Depends(get_processor)]
+LauncherDep = Annotated[Launcher, Depends(get_launcher)]
