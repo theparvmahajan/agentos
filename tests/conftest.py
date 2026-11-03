@@ -1,4 +1,5 @@
 import os
+import subprocess
 from uuid import uuid4
 
 import psycopg
@@ -67,3 +68,17 @@ def queues(redis_client):
     q.ensure_groups()
     yield q
     redis_client.delete(q.tasks.name, q.events.name)
+
+
+@pytest.fixture(scope="session")
+def docker_ready() -> None:
+    """The sandbox image must be present locally (`make sandbox`). Skips on a laptop, fails in CI."""
+    try:
+        found = subprocess.run(
+            ["docker", "image", "inspect", settings.code_exec_image],
+            capture_output=True, timeout=30, check=False,
+        ).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        found = False
+    if not found:
+        unavailable(f"Docker image {settings.code_exec_image} not available (run `make sandbox`)")

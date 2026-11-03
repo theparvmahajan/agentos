@@ -9,6 +9,11 @@ class ToolError(Exception):
     """A tool call failed. The message is written so an agent (or a person) can act on it."""
 
 
+class ToolUnavailable(ToolError):
+    """The tool cannot work at all right now (e.g. Docker is not running). Trying again
+    with different arguments is pointless, so the agent stops instead of burning LLM calls."""
+
+
 class UnknownTool(ToolError):
     pass
 
