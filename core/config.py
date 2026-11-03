@@ -16,7 +16,9 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     tavily_api_key: str = ""  # secrets live in .env only, never as defaults here
 
-    @field_validator("llm_provider", "llm_model", mode="before")
+    code_exec_backend: str = "docker"      # "docker" (isolated) or "local" (NO isolation)
+    code_exec_image: str = "python:3.12-slim"
+    @field_validator("llm_provider", "llm_model", "code_exec_backend", "code_exec_image", mode="before")
     @classmethod
     def _strip(cls, value: object) -> object:
         """A stray space in .env (or a default) breaks model lookups; remove it."""
