@@ -6,7 +6,7 @@ from core import repository as repo
 from core.dag import topological_order
 from core.db import get_conn
 from core.models import Mission, Task
-from services.api.deps import DatabaseUrl, ProcessorDep
+from services.api.deps import DatabaseUrl, LauncherDep
 from services.api.schemas import MissionCreate, MissionOut, TaskOut
 
 router = APIRouter(prefix="/missions", tags=["missions"])
@@ -55,12 +55,12 @@ def create_mission(
     background: BackgroundTasks,
     response: Response,
     database_url: DatabaseUrl,
-    processor: ProcessorDep,
+    launcher: LauncherDep,
 ) -> MissionOut:
     with get_conn(database_url) as conn:
         mission = repo.create_mission(conn, body.objective)
     # The block above committed, so the background job is guaranteed to find the row.
-    background.add_task(processor, mission.id)
+    background.add_task(launcher, mission.id)
     response.headers["Location"] = f"/missions/{mission.id}"
     return _to_out(mission, [], {})
 

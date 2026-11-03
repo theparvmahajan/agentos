@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from core import repository as repo
 from core.db import get_conn
 from core.models import MissionStatus, TaskStatus
-from services.api.deps import get_database_url, get_processor
+from services.api.deps import get_database_url, get_launcher
 from services.api.main import app
 
 MARK = "[api-test] "
@@ -17,7 +17,7 @@ AGENT_NAME = "api-test-agent"
 def api(test_db_url):
     processed = []
     app.dependency_overrides[get_database_url] = lambda: test_db_url
-    app.dependency_overrides[get_processor] = lambda: processed.append
+    app.dependency_overrides[get_launcher] = lambda: processed.append
     yield TestClient(app), processed
     app.dependency_overrides.clear()
     with get_conn(test_db_url) as conn:

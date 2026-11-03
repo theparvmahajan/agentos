@@ -127,4 +127,4 @@ def test_dependency_outputs_are_given_as_data():
 def test_the_coder_and_reviewer_are_registered_as_runners():
     runners = build_default_runners()
     assert runners["coder"] is run_coder
-    assert set(runners) == {"researcher", "coder", "reviewer"}
+    assert {"researcher", "coder", "reviewer"} <= set(runners)

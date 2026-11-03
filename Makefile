@@ -1,4 +1,4 @@
-.PHONY: up down run test lint migrate seed serve scheduler worker sandbox
+.PHONY: up down run test lint migrate seed serve scheduler worker sandbox bench
 up:
 	docker compose up -d
 down:
@@ -21,3 +21,5 @@ worker:
 	python -m services.worker
 sandbox:
 	docker pull python:3.12-slim
+bench:
+	python -m scripts.benchmark

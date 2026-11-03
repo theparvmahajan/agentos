@@ -1,51 +1,67 @@
 import logging
+import time
 from uuid import UUID
 
 from core import repository as repo
 from core.db import get_conn
-from core.executor import execute_mission
 from core.llm import LLMProvider
-from core.models import MissionStatus
+from core.models import MissionStatus, TaskStatus
 from core.planner import run_planner
-from core.runner import Runner
-from core.tools import ToolRegistry
+from core.queue import Queues
 
 log = logging.getLogger(__name__)
 
-
-def _fail_if_still_running(database_url: str | None, mission_id: UUID, message: str) -> None:
-    with get_conn(database_url) as conn:
-        mission = repo.get_mission(conn, mission_id)
-        if mission is not None and mission.status == MissionStatus.RUNNING:
-            repo.set_mission_status(conn, mission_id, MissionStatus.FAILED, error=message)
+# Waits between attempts to hand a planned mission to the scheduler (so 3 attempts in total).
+PUBLISH_RETRY_DELAYS = (0.2, 0.5)
 
 
-def process_mission(
+def _abandon(database_url: str | None, mission_id: UUID, message: str) -> None:
+    """Fail a planned mission whose hand-off to the scheduler never worked, and cancel its tasks
+    so nothing is left looking runnable. Never raises."""
+    try:
+        with get_conn(database_url) as conn:
+            repo.finish_mission_if_running(conn, mission_id, MissionStatus.FAILED, error=message)
+            for task in repo.get_tasks(conn, mission_id):
+                if task.status == TaskStatus.PENDING:
+                    repo.set_task_status(conn, task.id, TaskStatus.CANCELLED)
+    except Exception:
+        log.exception("could not mark mission %s as failed", mission_id)
+
+
+def plan_and_publish(
     mission_id: UUID,
     *,
-    runners: dict[str, Runner],
-    tools: ToolRegistry,
+    queues: Queues,
     provider: LLMProvider | None = None,
     database_url: str | None = None,
 ) -> None:
-    """Plan a pending mission, then execute it. Runs as a background job, so it never raises:
-    nobody is waiting to catch an exception. Failures are recorded on the mission instead."""
+    """Plan a pending mission, then wake the scheduler with one event. The scheduler and the
+    workers do everything after that.
+
+    Runs as a background job, so it never raises: nobody is waiting to catch an exception.
+    Failures are recorded on the mission instead.
+    """
     try:
         run_planner(mission_id, provider=provider, database_url=database_url)
     except Exception:  # the planner already marked the mission failed if it got that far
         log.exception("planning did not complete for mission %s", mission_id)
         return
 
-    try:
-        execute_mission(
-            mission_id,
-            runners=runners,
-            tools=tools,
-            provider=provider,
-            database_url=database_url,
-        )
-    except Exception as e:  # background job: record the failure, do not crash
-        log.exception("execution crashed for mission %s", mission_id)
-        _fail_if_still_running(
-            database_url, mission_id, f"internal error: {type(e).__name__}: {e}"
-        )
+    last_error: Exception | None = None
+    for delay in (0.0, *PUBLISH_RETRY_DELAYS):
+        if delay:
+            time.sleep(delay)
+        try:
+            queues.publish_event(mission_id)
+        except Exception as e:  # noqa: BLE001 - Redis may be briefly down; retried, then recorded
+            last_error = e
+            log.warning("could not publish mission %s to the scheduler: %r", mission_id, e)
+        else:
+            log.info("mission %s planned and handed to the scheduler", mission_id)
+            return
+
+    _abandon(
+        database_url,
+        mission_id,
+        f"could not hand the mission to the scheduler: {type(last_error).__name__}: {last_error}",
+    )
