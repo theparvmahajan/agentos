@@ -1,6 +1,7 @@
 import os
-from uuid import uuid4
 import subprocess
+from uuid import uuid4
+
 import psycopg
 import pytest
 import redis
