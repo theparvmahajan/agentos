@@ -8,6 +8,26 @@ AGENTS = [
         "capabilities": ["web.search"],
         "timeout_seconds": 90,
     },
+    {
+        "name": "coder",
+        "description": (
+            "Writes and runs small self-contained Python programs (standard library only, "
+            "no internet) and reports the code with its verified output. "
+            "Use it for calculations, data processing and small algorithms."
+        ),
+        "capabilities": ["code.execute"],
+        "timeout_seconds": 120,
+    },
+    {
+        "name": "reviewer",
+        "description": (
+            "Critically checks the output of earlier tasks (research notes, code and its "
+            "output) and answers VERDICT: APPROVE or REJECT with concrete findings. "
+            "Has no tools, so it MUST depend on the task(s) it reviews. Use it last."
+        ),
+        "capabilities": [],
+        "timeout_seconds": 60,
+    },
 ]
 
 
