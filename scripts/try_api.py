@@ -12,14 +12,14 @@ def main() -> None:
     objective = " ".join(sys.argv[1:]) or DEFAULT
     try:
         with httpx.Client(base_url=BASE, timeout=30) as client:
-            resp = client.post("/missions", json={"objective": objective})
+            resp = client.post("/api/v1/missions", json={"objective": objective})
             resp.raise_for_status()
             mission = resp.json()
             print(f"created {mission['id']}  (HTTP {resp.status_code}, Location: {resp.headers['location']})")
 
             last = None
             while True:
-                mission = client.get(f"/missions/{mission['id']}").json()
+                mission = client.get(f"/api/v1/missions/{mission['id']}").json()
                 snapshot = (mission["status"], tuple((t["key"], t["status"]) for t in mission["tasks"]))
                 if snapshot != last:
                     tasks = " ".join(f"{t['key']}={t['status']}" for t in mission["tasks"])

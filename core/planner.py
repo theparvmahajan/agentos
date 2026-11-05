@@ -1,4 +1,5 @@
 import json
+import logging
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -9,6 +10,8 @@ from core.db import get_conn
 from core.jsonutil import JSONExtractError, extract_json
 from core.llm import LLMProvider, TaskType, generate
 from core.models import Agent, MissionStatus, Task
+
+log = logging.getLogger(__name__)
 
 MAX_TASKS = 10
 
@@ -179,28 +182,47 @@ def run_planner(
     provider: LLMProvider | None = None,
     database_url: str | None = None,
 ) -> list[Task]:
-    """pending -> planning -> (tasks stored) -> running, or -> failed."""
+    """pending -> planning -> (tasks stored) -> running, or -> failed.
+
+    Returns the stored tasks, or [] if the mission was cancelled while the LLM was planning
+    (the plan is then thrown away)."""
     with get_conn(database_url) as conn:
         mission = repo.get_mission(conn, mission_id)
         if mission is None:
             raise LookupError(f"mission {mission_id} not found")
-        # Simple check; two simultaneous callers could both pass it.
-        # Fine while one caller exists; hardened with proper claiming in M4.
-        if mission.status != MissionStatus.PENDING:
-            raise ValueError(f"mission {mission_id} is {mission.status.value}, expected pending")
-        repo.set_mission_status(conn, mission_id, MissionStatus.PLANNING)
+        # One guarded UPDATE: of two simultaneous callers only one gets pending -> planning.
+        started = repo.transition_mission(
+            conn, mission_id, MissionStatus.PLANNING, allowed_from=[MissionStatus.PENDING]
+        )
+        if started is None:
+            current = repo.get_mission(conn, mission_id)
+            raise ValueError(f"mission {mission_id} is {current.status.value}, expected pending")
         agents = repo.list_agents(conn)
     # The block above committed. No connection is held open during the slow LLM call.
 
     try:
         plan = plan_mission(mission.objective, agents, provider=provider)
         with get_conn(database_url) as conn:  # tasks + status change commit together
+            # Lock the row, then check it is still ours: the user may have cancelled meanwhile.
+            current = conn.execute(
+                "SELECT status FROM missions WHERE id = %s FOR UPDATE", (mission_id,)
+            ).fetchone()
+            if current is None or current["status"] != MissionStatus.PLANNING.value:
+                log.info("mission %s is no longer planning; plan discarded", mission_id)
+                return []
             tasks = store_plan(conn, mission_id, plan, agents)
-            repo.set_mission_status(conn, mission_id, MissionStatus.RUNNING)
+            repo.transition_mission(
+                conn, mission_id, MissionStatus.RUNNING, allowed_from=[MissionStatus.PLANNING]
+            )
     except Exception as e:
         with get_conn(database_url) as conn:
-            repo.set_mission_status(
-                conn, mission_id, MissionStatus.FAILED, error=f"planning failed: {e}"
+            # Only fail it if it is still planning: never overwrite a cancellation.
+            repo.transition_mission(
+                conn,
+                mission_id,
+                MissionStatus.FAILED,
+                allowed_from=[MissionStatus.PLANNING],
+                error=f"planning failed: {e}",
             )
         raise
     return tasks

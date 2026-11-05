@@ -33,11 +33,7 @@ same time.
 handled**; it needs claiming and a sweeper in milestone 4. *The API after planning:* nothing is
 lost. The event is already on the stream and everything else lives in the scheduler, the workers,
 Postgres and Redis; the API only serves reads. This is new: before, a restart killed the whole run.
-*A worker in the middle of a task:* its message is delivered but not acknowledged, so it stays
-pending in Redis, and the same worker name re-reads its own pending messages on restart and
-finishes or retries the task; every status change is a guarded update, so doing it twice is
-safe. What is **not** handled: a worker that dies and never returns under the same name. Another
-worker does not take over its message yet. That is also milestone 4.
+*A worker in the middle of a task*: not handled. The task is left running. When the worker restarts, its unacknowledged message is redelivered, but the claim (ready to running) no longer matches because the task is already running, so the worker treats it as a duplicate, acknowledges it and moves on. The task stays running forever and the mission never finishes. Recovery needs leases, a heartbeat and a sweeper that returns abandoned running tasks to ready: milestone 4
 
 **2. Why fail the mission when Redis is unreachable?**
 Leaving it `running` would be a silent hang: the user would see a running mission that nothing

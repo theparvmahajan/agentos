@@ -63,3 +63,10 @@ class Task(BaseModel):
     created_at: datetime
     updated_at: datetime
     depends_on: list[UUID] = Field(default_factory=list)
+
+
+class MissionSummary(Mission):
+    """A mission plus task counts: what a list screen needs without loading every task."""
+
+    tasks_total: int = 0
+    tasks_completed: int = 0
