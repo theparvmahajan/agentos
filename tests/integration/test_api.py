@@ -30,14 +30,14 @@ def api(test_db_url):
 def test_post_creates_a_pending_mission_and_schedules_it(api, test_db_url):
     client, processed = api
 
-    resp = client.post("/missions", json={"objective": MARK + "compare databases"})
+    resp = client.post("/api/v1/missions", json={"objective": MARK + "compare databases"})
 
     assert resp.status_code == 202
     body = resp.json()
     assert body["status"] == "pending"
     assert body["objective"] == MARK + "compare databases"
     assert body["tasks"] == []
-    assert resp.headers["location"] == f"/missions/{body['id']}"
+    assert resp.headers["location"] == f"/api/v1/missions/{body['id']}"
     assert processed == [uuid.UUID(body["id"])]  # the background job got exactly this mission
 
     with get_conn(test_db_url) as conn:  # and the row is really committed
@@ -46,7 +46,7 @@ def test_post_creates_a_pending_mission_and_schedules_it(api, test_db_url):
 
 def test_post_strips_whitespace(api):
     client, _ = api
-    resp = client.post("/missions", json={"objective": f"   {MARK}padded   "})
+    resp = client.post("/api/v1/missions", json={"objective": f"   {MARK}padded   "})
     assert resp.json()["objective"] == MARK + "padded"
 
 
@@ -56,7 +56,7 @@ def test_post_strips_whitespace(api):
 )
 def test_post_rejects_invalid_input_without_creating_anything(api, payload):
     client, processed = api
-    resp = client.post("/missions", json=payload)
+    resp = client.post("/api/v1/missions", json=payload)
     assert resp.status_code == 422
     assert processed == []
 
@@ -65,20 +65,20 @@ def test_post_rejects_invalid_input_without_creating_anything(api, payload):
 
 def test_get_unknown_mission_is_404(api):
     client, _ = api
-    resp = client.get(f"/missions/{uuid.uuid4()}")
+    resp = client.get(f"/api/v1/missions/{uuid.uuid4()}")
     assert resp.status_code == 404
 
 
 def test_get_malformed_id_is_422(api):
     client, _ = api
-    assert client.get("/missions/not-a-uuid").status_code == 422
+    assert client.get("/api/v1/missions/not-a-uuid").status_code == 422
 
 
 def test_get_a_fresh_mission_has_no_tasks_yet(api):
     client, _ = api
-    created = client.post("/missions", json={"objective": MARK + "fresh"}).json()
+    created = client.post("/api/v1/missions", json={"objective": MARK + "fresh"}).json()
 
-    body = client.get(f"/missions/{created['id']}").json()
+    body = client.get(f"/api/v1/missions/{created['id']}").json()
 
     assert body["status"] == "pending"
     assert body["tasks"] == []
@@ -102,7 +102,7 @@ def test_get_returns_tasks_in_dependency_order_with_keys_and_details(api, test_d
         repo.set_task_status(conn, summary.id, TaskStatus.SKIPPED)
         repo.set_mission_status(conn, mission.id, MissionStatus.FAILED, error="something broke")
 
-    body = client.get(f"/missions/{mission.id}").json()
+    body = client.get(f"/api/v1/missions/{mission.id}").json()
 
     assert body["status"] == "failed"
     assert body["error"] == "something broke"
@@ -120,8 +120,8 @@ def test_get_returns_tasks_in_dependency_order_with_keys_and_details(api, test_d
 
 def test_responses_do_not_expose_internal_fields(api):
     client, _ = api
-    created = client.post("/missions", json={"objective": MARK + "private"}).json()
-    body = client.get(f"/missions/{created['id']}").json()
+    created = client.post("/api/v1/missions", json={"objective": MARK + "private"}).json()
+    body = client.get(f"/api/v1/missions/{created['id']}").json()
     assert "tenant_id" not in body
 
 

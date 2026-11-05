@@ -42,9 +42,12 @@ def plan_and_publish(
     Failures are recorded on the mission instead.
     """
     try:
-        run_planner(mission_id, provider=provider, database_url=database_url)
+        tasks = run_planner(mission_id, provider=provider, database_url=database_url)
     except Exception:  # the planner already marked the mission failed if it got that far
         log.exception("planning did not complete for mission %s", mission_id)
+        return
+    if not tasks:  # cancelled while planning: the plan was thrown away, nothing to schedule
+        log.info("mission %s was cancelled while planning; not scheduling it", mission_id)
         return
 
     last_error: Exception | None = None

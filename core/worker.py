@@ -23,6 +23,7 @@ class Outcome(str, Enum):
     FAILED = "failed"
     DUPLICATE = "duplicate"  # nothing to run: someone else has the task, or it already finished
     DROPPED = "dropped"  # malformed message, or a task that does not exist
+    DISCARDED = "discarded"  # the task was cancelled while it ran: its result is thrown away
 
 
 def _handle_duplicate(
@@ -37,6 +38,20 @@ def _handle_duplicate(
     log.info("task %s: duplicate message, nothing to run", task.id)
     queues.tasks.ack(message.id)
     return Outcome.DUPLICATE
+
+
+def _record(
+    database_url: str | None, task: Task, status: TaskStatus, outcome: Outcome, **fields
+) -> Outcome:
+    """Save a finished task's result. If the task was cancelled while it ran, the guarded update
+    no longer matches: the result is discarded and that is a normal outcome, not an error."""
+    try:
+        with get_conn(database_url) as conn:
+            repo.set_task_status(conn, task.id, status, **fields)
+    except InvalidTransition:
+        log.info("task %s was cancelled while running: result discarded", task.key)
+        return Outcome.DISCARDED
+    return outcome
 
 
 def handle_task_message(
@@ -96,20 +111,19 @@ def handle_task_message(
     except Exception as e:  # noqa: BLE001 - any runner failure is recorded on the task
         error = f"{type(e).__name__}: {e}"
         log.warning("task %s failed after %.1fs: %s", task.key, time.perf_counter() - started, error)
-        with get_conn(database_url) as conn:
-            repo.set_task_status(conn, task_id, TaskStatus.FAILED, error=error)
-        outcome = Outcome.FAILED
+        outcome = _record(database_url, task, TaskStatus.FAILED, Outcome.FAILED, error=error)
     else:
-        with get_conn(database_url) as conn:
-            repo.set_task_status(conn, task_id, TaskStatus.COMPLETED, output=result.output)
-        log.info(
-            "task %s completed in %.1fs (%d steps, %d tool calls)",
-            task.key,
-            time.perf_counter() - started,
-            result.steps,
-            result.tool_calls,
+        outcome = _record(
+            database_url, task, TaskStatus.COMPLETED, Outcome.COMPLETED, output=result.output
         )
-        outcome = Outcome.COMPLETED
+        if outcome is Outcome.COMPLETED:
+            log.info(
+                "task %s completed in %.1fs (%d steps, %d tool calls)",
+                task.key,
+                time.perf_counter() - started,
+                result.steps,
+                result.tool_calls,
+            )
 
     # Order matters: the result is committed above, THEN announced, THEN the message is
     # acknowledged. A crash between any two steps is recovered when the message is redelivered.

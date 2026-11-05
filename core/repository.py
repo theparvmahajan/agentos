@@ -1,4 +1,5 @@
 from collections import defaultdict
+from datetime import datetime
 from uuid import UUID
 
 import psycopg
@@ -7,6 +8,7 @@ from core.models import (
     Agent,
     Mission,
     MissionStatus,
+    MissionSummary,
     Task,
     TaskStatus,
 )
@@ -228,3 +230,99 @@ def get_task(conn: psycopg.Connection, task_id: UUID) -> Task | None:
         "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = %s", (task_id,)
     ).fetchall()
     return Task(**row, depends_on=[d["depends_on_task_id"] for d in deps])
+
+
+# ---------- guarded mission transitions, cancelling, listing ----------
+
+def transition_mission(
+    conn: psycopg.Connection,
+    mission_id: UUID,
+    new_status: MissionStatus,
+    *,
+    allowed_from: list[MissionStatus],
+    result: str | None = None,
+    error: str | None = None,
+) -> Mission | None:
+    """Move a mission to `new_status` only if it is currently in one of `allowed_from`.
+
+    The check and the write are ONE statement, so a late writer (a planner that finished after
+    the user cancelled) cannot overwrite a newer state. Returns None if the guard did not match.
+    """
+    row = conn.execute(
+        """
+        UPDATE missions
+        SET status = %s,
+            result = COALESCE(%s, result),
+            error = COALESCE(%s, error),
+            updated_at = now(),
+            completed_at = CASE WHEN %s THEN now() ELSE completed_at END
+        WHERE id = %s AND status = ANY(%s)
+        RETURNING *
+        """,
+        (
+            new_status.value,
+            result,
+            error,
+            new_status in MISSION_TERMINAL,
+            mission_id,
+            [s.value for s in allowed_from],
+        ),
+    ).fetchone()
+    return Mission(**row) if row else None
+
+
+def cancel_mission(conn: psycopg.Connection, mission_id: UUID) -> Mission | None:
+    """Cancel a mission and every task that has not finished, in the caller's transaction.
+
+    Returns None if the mission does not exist or had already finished. A task that is RUNNING
+    is marked cancelled too: its worker cannot be interrupted, but when it finishes its result
+    is discarded (the guarded update no longer matches).
+    """
+    open_states = [s for s in MissionStatus if s not in MISSION_TERMINAL]
+    mission = transition_mission(
+        conn, mission_id, MissionStatus.CANCELLED, allowed_from=open_states
+    )
+    if mission is None:
+        return None
+    conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'cancelled', finished_at = now(), updated_at = now()
+        WHERE mission_id = %s AND status = ANY(%s)
+        """,
+        (mission_id, [s.value for s in allowed_sources(TaskStatus.CANCELLED)]),
+    )
+    return mission
+
+
+def list_missions(
+    conn: psycopg.Connection,
+    *,
+    limit: int,
+    status: MissionStatus | None = None,
+    before: tuple[datetime, UUID] | None = None,
+) -> list[MissionSummary]:
+    """Newest first. `before` is the (created_at, id) of the last row of the previous page,
+    so paging is stable even while new missions are being created."""
+    conditions, params = [], []
+    if status is not None:
+        conditions.append("m.status = %s")
+        params.append(status.value)
+    if before is not None:
+        conditions.append("(m.created_at, m.id) < (%s, %s)")
+        params.extend(before)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    rows = conn.execute(
+        f"""
+        SELECT m.*,
+               (SELECT count(*) FROM tasks t WHERE t.mission_id = m.id) AS tasks_total,
+               (SELECT count(*) FROM tasks t
+                 WHERE t.mission_id = m.id AND t.status = 'completed') AS tasks_completed
+        FROM missions m
+        {where}
+        ORDER BY m.created_at DESC, m.id DESC
+        LIMIT %s
+        """,  # only fixed fragments are interpolated above; every value is a parameter
+        (*params, limit),
+    ).fetchall()
+    return [MissionSummary(**r) for r in rows]

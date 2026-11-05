@@ -69,7 +69,7 @@ def stack(test_db_url, queues):
 def test_a_posted_mission_is_planned_scheduled_and_completed_by_the_workers(stack):
     client, llm = stack
 
-    created = client.post("/missions", json={"objective": MARK + "two then one"})
+    created = client.post("/api/v1/missions", json={"objective": MARK + "two then one"})
     assert created.status_code == 202
 
     deadline = time.time() + 15
