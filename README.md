@@ -7,7 +7,7 @@ tool call, and runs agent-written code in a locked-down container.
 > The model decides what it wants to do; the runtime decides whether it can.
 
 **Status:** M0-M2 complete: planning, DAG scheduling, distributed workers, three agents
-(researcher, coder, reviewer), sandboxed code execution. Next: M3 (live dashboard).
+(researcher, coder, reviewer), sandboxed code execution. Next: M3 Frontend(live dashboard).
 See [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Architecture
