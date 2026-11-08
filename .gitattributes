@@ -1,0 +1,7 @@
+# Containers run Linux: CRLF in a shell script, Dockerfile or Caddyfile breaks them.
+* text=auto
+*.sh text eol=lf
+Dockerfile* text eol=lf
+Caddyfile text eol=lf
+*.yml text eol=lf
+*.sql text eol=lf

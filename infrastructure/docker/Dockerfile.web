@@ -1,0 +1,23 @@
+# The dashboard. NEXT_PUBLIC_API_URL is baked into the browser bundle at BUILD time, so the
+# image is built for one public address (see docker-compose.prod.yml).
+FROM node:22.13-slim AS deps
+WORKDIR /app
+COPY package.json package-lock.json .npmrc ./
+RUN npm ci
+
+FROM node:22.13-slim AS build
+WORKDIR /app
+ARG NEXT_PUBLIC_API_URL=http://localhost:8080
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL NEXT_TELEMETRY_DISABLED=1
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+RUN npm run build
+
+FROM node:22.13-slim AS run
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
+WORKDIR /app
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+USER node
+EXPOSE 3000
+CMD ["node", "server.js"]

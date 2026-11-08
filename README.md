@@ -6,11 +6,15 @@ tool call, runs agent-written code in a locked-down container, and streams progr
 
 > The model decides what it wants to do; the runtime decides whether it can.
 
-**Status:** M0-M2 complete (planning, DAG scheduling, distributed workers, three agents,
-sandboxed code execution). M3 in progress: the live event stream, mission list and cancel (#14)
-and the Next.js dashboard (#15) are done; deployment and the demo are next (#16). See
-[docs/ROADMAP.md](docs/ROADMAP.md), the API reference in [docs/API.md](docs/API.md) and the
-dashboard's notes in [frontend/README.md](frontend/README.md).
+**Status:** v1 (milestones M0-M3). Planning, DAG scheduling, distributed workers, three agents,
+sandboxed code execution, a live dashboard, and a one-command container deployment. Reliability
+(M4) and security (M5) come next; today the API has no login of its own, so the deployment puts
+one in front of every write. See [docs/ROADMAP.md](docs/ROADMAP.md), [docs/API.md](docs/API.md),
+[docs/DEPLOY.md](docs/DEPLOY.md) and [frontend/README.md](frontend/README.md).
+
+<!-- Uncomment once docs/media/demo.gif exists (see docs/DEMO.md):
+![AgentOS: a mission fanning out across workers](docs/media/demo.gif)
+-->
 
 ## Architecture
 
@@ -47,7 +51,54 @@ flowchart LR
 - **Agent-written code runs in a container** (no network, read-only filesystem, no capabilities,
   non-root, memory/CPU/process limits) and the tool fails closed if Docker is unavailable.
 
-## Quick start
+### One mission, end to end
+
+```mermaid
+sequenceDiagram
+    participant U as Dashboard
+    participant A as API
+    participant P as Postgres
+    participant S as Scheduler
+    participant W as Workers
+    U->>A: POST /api/v1/missions (objective)
+    A->>P: mission = pending
+    A-->>U: 202 + Location
+    A->>A: planner LLM call, validate the plan
+    A->>P: store tasks and dependencies (mission = running)
+    A->>S: event: planned
+    loop until every task is finished
+        S->>P: which tasks are ready? (pure function of statuses)
+        S->>P: pending -> ready (guarded UPDATE)
+        S->>W: task ids on a stream
+        W->>P: ready -> running (guarded: one winner)
+        W->>W: agent loop: LLM + tools (code runs in a container)
+        W->>P: running -> completed / failed
+        W->>S: event: task finished
+    end
+    S->>P: mission = completed / failed
+    P-->>U: every commit reaches the page over the WebSocket
+```
+
+### Measured, not claimed
+
+On a benchmark of fixed-duration tasks (so the runtime is measured, not the LLM), an 8-way fan-out
+runs **2.42x faster with 4 workers than sequentially** (5.64 s to 2.33 s), while a dependency chain
+correctly does not speed up. Method, machine and every number: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Real LLM tasks scale less, because a single local model may serialise requests.
+
+## Run it with Docker (everything in containers)
+
+```bash
+cp .env.example .env     # set POSTGRES_PASSWORD, LLM_*, TAVILY_API_KEY, DOCKER_GID, ADMIN_PASSWORD_HASH
+make hash-password       # makes the hash for the admin login
+make prod-up             # builds and starts: Postgres, Redis, API, scheduler, worker, dashboard, Caddy
+```
+
+Open http://localhost:8080. The same compose file deploys to a public host with automatic HTTPS.
+**Read [docs/DEPLOY.md](docs/DEPLOY.md) first**: it explains the login gate, the Docker-socket
+trade-off of the code sandbox, and the known limits.
+
+## Develop it (processes on your machine)
 
 ```bash
 cp .env.example .env              # then fill in TAVILY_API_KEY (and LLM settings) locally
@@ -83,7 +134,10 @@ mission. Full reference with message formats and close codes: [docs/API.md](docs
 ## Safety notes
 
 - Never commit `.env`. Secrets live there only, never as defaults in code.
-- The API and the dashboard have no authentication yet (milestone M5): run them on localhost.
+- The API itself has no authentication yet (milestone M5). The container deployment puts a basic-auth
+  login in front of every `POST` and leaves reads open; running the processes yourself, keep them on localhost.
+- The worker container mounts the Docker socket to start sandboxes, which is root-equivalent on that
+  host: use a dedicated machine ([docs/DEPLOY.md](docs/DEPLOY.md)).
 - `CODE_EXEC_BACKEND=docker` is the default. `CODE_EXEC_BACKEND=local` runs agent code on your own
   machine with no isolation and exists only as an explicit opt-in.
 - Containers share the host kernel: strong isolation for a dev machine, not for hostile strangers.

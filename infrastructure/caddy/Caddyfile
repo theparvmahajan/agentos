@@ -1,0 +1,25 @@
+# The only service that is published to the internet. One address, two backends:
+#   /api/*, /health, /docs  -> the API (REST and the WebSocket stream)
+#   everything else         -> the dashboard
+#
+# SITE_ADDRESS=:80 (the default) serves plain http for trying it on one machine.
+# SITE_ADDRESS=agentos.example.com makes Caddy fetch and renew a TLS certificate by itself.
+#
+# The API has no login yet (milestone M5), so every POST (start a mission, cancel one) needs the
+# admin password. Reading is open, so a visitor can watch but not spend your LLM credits.
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	@backend path /api/* /health /docs /openapi.json
+	handle @backend {
+		@write method POST
+		basic_auth @write {
+			{$ADMIN_USER} {$ADMIN_PASSWORD_HASH}
+		}
+		reverse_proxy api:8000
+	}
+
+	handle {
+		reverse_proxy web:3000
+	}
+}

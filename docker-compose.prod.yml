@@ -1,0 +1,167 @@
+# The whole system in containers, behind one public address.
+#
+#   cp .env.example .env     # fill in the "deployment" section (see docs/DEPLOY.md)
+#   docker compose -f docker-compose.prod.yml up -d --build --wait
+#
+# (docker-compose.yml, the one `make up` uses, stays Postgres + Redis only, for development.)
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://agentos:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/agentos
+  REDIS_URL: redis://redis:6379/0
+  QUEUE_PREFIX: ${QUEUE_PREFIX:-agentos}
+  LLM_PROVIDER: ${LLM_PROVIDER:-openai_compatible}
+  LLM_MODEL: ${LLM_MODEL:?set LLM_MODEL in .env}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+  CODE_EXEC_BACKEND: docker
+  CODE_EXEC_IMAGE: ${CODE_EXEC_IMAGE:-python:3.12-slim}
+  CORS_ORIGINS: ${PUBLIC_URL:-http://localhost:8080}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: agentos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: agentos
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agentos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Runs once per `up`: apply migrations, register the three agents. Both are safe to repeat.
+  migrate:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.backend
+      target: base
+    command: ["sh", "-c", "python -m scripts.migrate && python -m scripts.seed_agents"]
+    environment: *backend-env
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The code sandbox starts containers on the HOST's Docker, so the host needs the image.
+  # `--pull never` is used at run time, so this has to happen first.
+  sandbox-image:
+    image: docker:27-cli
+    command: ["pull", "${CODE_EXEC_IMAGE:-python:3.12-slim}"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.backend
+      target: base
+    restart: unless-stopped
+    environment: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  scheduler:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.backend
+      target: base
+    command: ["python", "-m", "services.scheduler"]
+    restart: unless-stopped
+    environment: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+  # Scale with:  docker compose -f docker-compose.prod.yml up -d --scale worker=3
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/Dockerfile.backend
+      target: worker
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-1}
+    volumes:
+      # SECURITY: access to this socket is root on the host. Only this process has it, and it
+      # only runs one fixed `docker run` command (see core/tools/python_exec.py), but treat the
+      # machine as dedicated to AgentOS. docs/DEPLOY.md explains the risk.
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      sandbox-image:
+        condition: service_completed_successfully
+
+  web:
+    build:
+      context: frontend
+      dockerfile: ../infrastructure/docker/Dockerfile.web
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_URL:-http://localhost:8080}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+      ADMIN_USER: ${ADMIN_USER:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH in .env (docs/DEPLOY.md)}
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

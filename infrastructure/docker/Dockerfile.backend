@@ -1,0 +1,23 @@
+# One image for the API, the scheduler, the worker and the one-shot migrate job.
+# The compose file picks the process with `command:`.
+FROM python:3.12-slim AS base
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY agents ./agents
+COPY core ./core
+COPY services ./services
+COPY scripts ./scripts
+COPY infrastructure/db ./infrastructure/db
+RUN useradd --create-home --uid 10001 agentos
+USER agentos
+CMD ["uvicorn", "services.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# The worker runs agent code by starting throwaway containers, so it needs the docker CLI
+# (the client only; the daemon is the host's, reached through the mounted socket).
+FROM base AS worker
+USER root
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
+USER agentos
+CMD ["python", "-m", "services.worker"]
