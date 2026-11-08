@@ -21,6 +21,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("a login in front of the API", () => {
+  it("explains a 401 instead of showing a bare status", async () => {
+    mockFetch(reply(401, null));
+    await expect(createMission("hello")).rejects.toMatchObject({
+      status: 401,
+      message: expect.stringContaining("admin login"),
+    });
+  });
+});
+
 describe("listMissions", () => {
   it("asks for 20 by default", async () => {
     const fn = mockFetch(reply(200, { items: [], next_cursor: null }));

@@ -1,4 +1,4 @@
-.PHONY: up down run test lint migrate seed serve scheduler worker sandbox bench web-install web web-check web-build
+.PHONY: up down run test lint migrate seed serve scheduler worker sandbox bench web-install web web-check web-build prod-up prod-down prod-logs hash-password
 up:
 	docker compose up -d
 down:
@@ -33,3 +33,11 @@ web-check:
 	npm --prefix frontend test
 web-build:
 	npm --prefix frontend run build
+prod-up:
+	docker compose -f docker-compose.prod.yml up -d --build
+prod-down:
+	docker compose -f docker-compose.prod.yml down
+prod-logs:
+	docker compose -f docker-compose.prod.yml logs -f --tail=100
+hash-password:
+	docker run --rm -it caddy:2.8-alpine caddy hash-password

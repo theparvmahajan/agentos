@@ -36,6 +36,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(0, `Cannot reach the API at ${API_URL}. Is it running?`);
   }
   const body: unknown = await response.json().catch(() => null);
+  if (response.status === 401) {
+    // A deployment puts a login in front of every POST (docs/DEPLOY.md). The browser normally
+    // asks for it itself; if it was dismissed, say what is going on instead of a bare 401.
+    throw new ApiError(401, "Starting or cancelling missions on this server needs the admin login.");
+  }
   if (!response.ok) {
     throw new ApiError(response.status, describe(body, `Request failed (${response.status})`));
   }
