@@ -2,11 +2,13 @@ import logging
 import threading
 import time
 from enum import Enum
+from typing import Self
 from uuid import UUID
 
 import redis
 
 from core import repository as repo
+from core.config import settings
 from core.db import get_conn
 from core.llm import LLMProvider
 from core.models import Task, TaskStatus
@@ -40,16 +42,72 @@ def _handle_duplicate(
     return Outcome.DUPLICATE
 
 
+class LeaseKeeper:
+    """Renews a task's lease from a background thread while its runner works.
+
+    The runner is a blocking call (an LLM, a tool), so the heartbeat has to live on its own
+    thread. Each beat uses a short-lived connection. A failed beat (database blip) is logged and
+    retried at the next tick: the lease only expires if the trouble outlasts the whole lease.
+    If a beat finds the lease is no longer ours, `lost` becomes True and beating stops; the
+    worker's result is then refused by the fencing check anyway.
+    """
+
+    def __init__(
+        self,
+        task_id: UUID,
+        owner: str,
+        attempt: int,
+        *,
+        lease_seconds: float,
+        interval: float,
+        database_url: str | None,
+    ):
+        self._args = (task_id, owner, attempt)
+        self._lease_seconds = lease_seconds
+        self._interval = interval
+        self._database_url = database_url
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"lease-{task_id}", daemon=True)
+        self.lost = False
+
+    def __enter__(self) -> Self:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                with get_conn(self._database_url) as conn:
+                    ok = repo.renew_lease(conn, *self._args, self._lease_seconds)
+            except Exception:  # logged below; the next tick tries again
+                log.exception("task %s: lease renewal failed; will retry", self._args[0])
+                continue
+            if not ok:
+                self.lost = True
+                log.warning("task %s: lease lost (reaped or finished elsewhere)", self._args[0])
+                return
+
+
 def _record(
-    database_url: str | None, task: Task, status: TaskStatus, outcome: Outcome, **fields
+    database_url: str | None,
+    task: Task,
+    attempt: int,
+    status: TaskStatus,
+    outcome: Outcome,
+    **fields,
 ) -> Outcome:
-    """Save a finished task's result. If the task was cancelled while it ran, the guarded update
-    no longer matches: the result is discarded and that is a normal outcome, not an error."""
+    """Save a finished task's result. The update is fenced to this claim's attempt, so a result
+    that arrives after the task was cancelled OR handed to another worker (lease expired) matches
+    nothing: it is discarded, a normal outcome and not an error."""
     try:
         with get_conn(database_url) as conn:
-            repo.set_task_status(conn, task.id, status, **fields)
+            repo.set_task_status(conn, task.id, status, attempt=attempt, **fields)
     except InvalidTransition:
-        log.info("task %s was cancelled while running: result discarded", task.key)
+        log.info("task %s: no longer ours (cancelled or lease lost): result discarded", task.key)
         return Outcome.DISCARDED
     return outcome
 
@@ -62,6 +120,9 @@ def handle_task_message(
     tools: ToolRegistry,
     provider: LLMProvider | None = None,
     database_url: str | None = None,
+    consumer: str = "worker",
+    lease_seconds: float | None = None,
+    heartbeat_seconds: float | None = None,
 ) -> Outcome:
     """Run the task a message points at, record the result, announce it, acknowledge the message.
 
@@ -86,13 +147,19 @@ def handle_task_message(
         queues.tasks.ack(message.id)
         return Outcome.DROPPED
 
-    # Claim: READY -> RUNNING is a guarded update, so only one worker can win it,
-    # however many times the message was delivered.
+    lease_seconds = settings.task_lease_seconds if lease_seconds is None else lease_seconds
+    heartbeat_seconds = (
+        settings.lease_heartbeat_seconds if heartbeat_seconds is None else heartbeat_seconds
+    )
+
+    # Claim: READY -> RUNNING is a guarded update, so only one worker can win it, however many
+    # times the message was delivered. The same transaction takes the lease.
     try:
         with get_conn(database_url) as conn:
-            repo.set_task_status(conn, task_id, TaskStatus.RUNNING)
+            claimed = repo.claim_task(conn, task_id, consumer, lease_seconds)
     except InvalidTransition:
         return _handle_duplicate(message, queues, task, database_url)
+    attempt = claimed.attempts  # the fencing token for everything this claim writes
 
     by_id = {t.id: t for t in mission_tasks}
     agent = agents[task.agent_id]
@@ -107,14 +174,29 @@ def handle_task_message(
             DependencyOutput(by_id[d].key, by_id[d].instruction, by_id[d].output or "")
             for d in task.depends_on
         ]
-        result = runner(agent, task.instruction, dependencies, tools=tools, provider=provider)
+        with LeaseKeeper(
+            task_id,
+            consumer,
+            attempt,
+            lease_seconds=lease_seconds,
+            interval=heartbeat_seconds,
+            database_url=database_url,
+        ):
+            result = runner(agent, task.instruction, dependencies, tools=tools, provider=provider)
     except Exception as e:  # noqa: BLE001 - any runner failure is recorded on the task
         error = f"{type(e).__name__}: {e}"
         log.warning("task %s failed after %.1fs: %s", task.key, time.perf_counter() - started, error)
-        outcome = _record(database_url, task, TaskStatus.FAILED, Outcome.FAILED, error=error)
+        outcome = _record(
+            database_url, task, attempt, TaskStatus.FAILED, Outcome.FAILED, error=error
+        )
     else:
         outcome = _record(
-            database_url, task, TaskStatus.COMPLETED, Outcome.COMPLETED, output=result.output
+            database_url,
+            task,
+            attempt,
+            TaskStatus.COMPLETED,
+            Outcome.COMPLETED,
+            output=result.output,
         )
         if outcome is Outcome.COMPLETED:
             log.info(
@@ -143,6 +225,8 @@ def run_worker(
     database_url: str | None = None,
     block_ms: int = 1000,
     retry_delay: float = 1.0,
+    lease_seconds: float | None = None,
+    heartbeat_seconds: float | None = None,
 ) -> None:
     """Take tasks off the stream one at a time. Run several of these (processes or threads, each
     with its own `consumer` name) to run tasks in parallel: the consumer group gives every
@@ -171,6 +255,9 @@ def run_worker(
                     tools=tools,
                     provider=provider,
                     database_url=database_url,
+                    consumer=consumer,
+                    lease_seconds=lease_seconds,
+                    heartbeat_seconds=heartbeat_seconds,
                 )
             except Exception:  # keeps the worker alive; the message stays pending and is retried
                 log.exception("task message %s could not be handled; will retry", message.id)

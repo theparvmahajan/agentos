@@ -159,7 +159,15 @@ def set_task_status(
     *,
     output: str | None = None,
     error: str | None = None,
+    attempt: int | None = None,
 ) -> Task:
+    """Move a task along the state machine with ONE guarded UPDATE.
+
+    `attempt` is a fencing token: when given, the update only matches if the task is still on
+    that attempt. A worker whose lease expired (a "zombie") may still be running attempt 1 after
+    the reaper queued attempt 2; its late result carries attempt=1, matches nothing, and is
+    refused, so it can never overwrite the retry.
+    """
     is_running = new_status == TaskStatus.RUNNING
     row = conn.execute(
         """
@@ -171,7 +179,7 @@ def set_task_status(
             started_at = CASE WHEN %s THEN now() ELSE started_at END,
             finished_at = CASE WHEN %s THEN now() ELSE finished_at END,
             updated_at = now()
-        WHERE id = %s AND status = ANY(%s)
+        WHERE id = %s AND status = ANY(%s) AND (%s::int IS NULL OR attempts = %s::int)
         RETURNING *
         """,
         (
@@ -183,6 +191,8 @@ def set_task_status(
             new_status in TASK_TERMINAL,
             task_id,
             [s.value for s in allowed_sources(new_status)],
+            attempt,
+            attempt,
         ),
     ).fetchone()
 
@@ -192,9 +202,129 @@ def set_task_status(
         ).fetchone()
         if current is None:
             raise LookupError(f"task {task_id} not found")
-        raise InvalidTransition(f"task {task_id}: {current['status']} -> {new_status.value}")
+        raise InvalidTransition(
+            f"task {task_id}: {current['status']} -> {new_status.value}"
+            + (f" (fenced to attempt {attempt})" if attempt is not None else "")
+        )
 
     return Task(**row, depends_on=[])
+
+
+# ---------- leases: who is running a task, and for how long ----------
+
+
+def claim_task(
+    conn: psycopg.Connection, task_id: UUID, owner: str, lease_seconds: float
+) -> Task:
+    """READY -> RUNNING and take the lease, in one transaction.
+
+    Raises InvalidTransition if someone else got there first. The returned task's `attempts` is
+    this claim's fencing token: pass it to set_task_status and renew_lease.
+    """
+    task = set_task_status(conn, task_id, TaskStatus.RUNNING)
+    conn.execute(
+        """
+        INSERT INTO task_leases (task_id, owner, attempt, expires_at, renewed_at)
+        VALUES (%s, %s, %s, now() + make_interval(secs => %s), now())
+        ON CONFLICT (task_id) DO UPDATE
+        SET owner = EXCLUDED.owner, attempt = EXCLUDED.attempt,
+            expires_at = EXCLUDED.expires_at, renewed_at = EXCLUDED.renewed_at
+        """,
+        (task_id, owner, task.attempts, lease_seconds),
+    )
+    return task
+
+
+def renew_lease(
+    conn: psycopg.Connection, task_id: UUID, owner: str, attempt: int, lease_seconds: float
+) -> bool:
+    """Push the lease's expiry forward. False means the lease is no longer ours (it was reaped
+    and the task handed on, or finished); the caller should stop beating."""
+    row = conn.execute(
+        """
+        UPDATE task_leases l
+        SET expires_at = now() + make_interval(secs => %s), renewed_at = now()
+        FROM tasks t
+        WHERE l.task_id = %s AND l.owner = %s AND l.attempt = %s
+          AND t.id = l.task_id AND t.status = 'running' AND t.attempts = l.attempt
+        RETURNING l.task_id
+        """,
+        (lease_seconds, task_id, owner, attempt),
+    ).fetchone()
+    return row is not None
+
+
+def find_orphaned_tasks(
+    conn: psycopg.Connection, *, lease_seconds: float, limit: int = 50
+) -> list[tuple[UUID, int]]:
+    """(task id, attempt) of running tasks whose worker has stopped renewing.
+
+    Orphaned = the lease for the CURRENT attempt has expired, or there is no such lease and the
+    task has been running longer than a full lease (a task claimed before leases existed; the
+    grace period keeps a rolling upgrade from reaping work that is still alive).
+    """
+    rows = conn.execute(
+        """
+        SELECT t.id, t.attempts
+        FROM tasks t
+        LEFT JOIN task_leases l ON l.task_id = t.id AND l.attempt = t.attempts
+        WHERE t.status = 'running'
+          AND (
+                (l.task_id IS NOT NULL AND l.expires_at <= now())
+             OR (l.task_id IS NULL AND t.updated_at <= now() - make_interval(secs => %s))
+          )
+        ORDER BY t.updated_at
+        LIMIT %s
+        """,
+        (lease_seconds, limit),
+    ).fetchall()
+    return [(r["id"], r["attempts"]) for r in rows]
+
+
+def recover_orphaned_task(
+    conn: psycopg.Connection, task_id: UUID, attempt: int, *, lease_seconds: float, reason: str
+) -> tuple[str, Task] | None:
+    """Requeue or fail one orphaned task. Returns ("requeued"|"failed", task), or None if the
+    task was no longer orphaned (it finished, was renewed, or another reaper got there first).
+
+    Each branch is a single guarded UPDATE that re-checks "still running, still this attempt,
+    still no live lease", so two reapers racing on one task produce exactly one recovery.
+    """
+    still_orphaned = """
+        t.id = %(id)s AND t.status = 'running' AND t.attempts = %(attempt)s
+        AND NOT EXISTS (
+            SELECT 1 FROM task_leases l
+            WHERE l.task_id = t.id AND l.attempt = t.attempts AND l.expires_at > now()
+        )
+        AND (
+            EXISTS (SELECT 1 FROM task_leases l WHERE l.task_id = t.id AND l.attempt = t.attempts)
+            OR t.updated_at <= now() - make_interval(secs => %(grace)s)
+        )
+    """
+    params = {"id": task_id, "attempt": attempt, "grace": lease_seconds, "reason": reason}
+    row = conn.execute(
+        f"""
+        UPDATE tasks t
+        SET status = 'ready', last_error = %(reason)s, updated_at = now()
+        WHERE {still_orphaned} AND t.attempts < t.max_attempts
+        RETURNING t.*
+        """,
+        params,
+    ).fetchone()
+    if row is not None:
+        return "requeued", Task(**row, depends_on=[])
+    row = conn.execute(
+        f"""
+        UPDATE tasks t
+        SET status = 'failed', last_error = %(reason)s, finished_at = now(), updated_at = now()
+        WHERE {still_orphaned} AND t.attempts >= t.max_attempts
+        RETURNING t.*
+        """,
+        params,
+    ).fetchone()
+    if row is not None:
+        return "failed", Task(**row, depends_on=[])
+    return None
 
 
 def finish_mission_if_running(

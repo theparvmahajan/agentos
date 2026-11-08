@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from uuid import UUID
@@ -11,6 +12,7 @@ from core.db import get_conn
 from core.models import Mission, MissionStatus, TaskStatus
 from core.queue import Message, Queues
 from core.readiness import nodes_from_tasks, plan_next
+from core.reaper import reap_expired
 from core.results import compose_result, describe_failure, in_dependency_order
 from core.state import InvalidTransition
 
@@ -117,16 +119,28 @@ def run_scheduler(
     block_ms: int = 1000,
     batch: int = 20,
     retry_delay: float = 1.0,
+    reap_interval: float | None = None,
+    lease_seconds: float | None = None,
 ) -> None:
     """Wake up on mission events and run a scheduling pass for each mission mentioned.
+
+    With `reap_interval` set, the same loop also recovers tasks whose worker died every that
+    many seconds (see core/reaper.py). Several schedulers may reap at once; it is race-safe.
 
     Several copies can run at once (use a different `consumer` name for each): the consumer
     group hands every event to exactly one of them.
     """
     queues.ensure_groups()
     log.info("scheduler %s started", consumer)
+    next_reap = time.monotonic()
 
     while not stop.is_set():
+        if reap_interval is not None and time.monotonic() >= next_reap:
+            next_reap = time.monotonic() + reap_interval
+            try:
+                reap_expired(queues, lease_seconds=lease_seconds, database_url=database_url)
+            except Exception:  # logged below; the next interval tries again
+                log.exception("reaper pass failed")
         try:
             # First anything we received before but never acknowledged (a failed pass, a restart),
             # then wait for new events.
