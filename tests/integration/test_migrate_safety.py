@@ -13,6 +13,8 @@ from core.config import settings
 from scripts import migrate
 
 SQL_002 = Path("infrastructure/db/migrations/002_change_notifications.sql")
+# Every migration file, so adding one does not mean editing each assertion below.
+ALL_MIGRATIONS = sorted(p.name for p in Path("infrastructure/db/migrations").glob("*.sql"))
 TRIGGERS = ["missions_notify", "tasks_notify"]
 
 
@@ -101,7 +103,7 @@ def test_applying_002_by_hand_first_does_not_break_make_migrate(scratch, only_00
 
     migrate.run(url)  # no error
 
-    assert recorded(url) == ["001_init.sql", "002_change_notifications.sql"]
+    assert recorded(url) == ALL_MIGRATIONS
     assert triggers(url) == TRIGGERS  # exactly one of each
 
 
@@ -129,7 +131,7 @@ def test_a_session_writing_to_a_table_makes_the_migration_fail_fast_and_name_the
     assert recorded(url) == ["001_init.sql"]  # nothing half-applied
 
     migrate.run(url)  # and once the blocker is gone it simply works
-    assert recorded(url) == ["001_init.sql", "002_change_notifications.sql"]
+    assert recorded(url) == ALL_MIGRATIONS
 
 
 def test_a_session_that_only_reads_does_not_block_the_migration(scratch, only_001):
@@ -182,7 +184,7 @@ def test_reapplying_002_over_existing_triggers_does_not_wait_for_readers(scratch
         reader.rollback()
         reader.close()
     assert not thread.is_alive() and "error" not in out
-    assert recorded(url)[-1] == "002_change_notifications.sql" and triggers(url) == TRIGGERS
+    assert "002_change_notifications.sql" in recorded(url) and triggers(url) == TRIGGERS
 
 
 # ---------- the database is not running ----------

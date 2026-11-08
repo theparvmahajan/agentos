@@ -10,7 +10,7 @@ tool call, runs agent-written code in a locked-down container, and streams progr
 sandboxed code execution, a live dashboard, and a one-command container deployment. Reliability
 (M4) and security (M5) come next; today the API has no login of its own, so the deployment puts
 one in front of every write. See [docs/ROADMAP.md](docs/ROADMAP.md), [docs/API.md](docs/API.md),
-[docs/DEPLOY.md](docs/DEPLOY.md) and [frontend/README.md](frontend/README.md).
+[docs/RELIABILITY.md](docs/RELIABILITY.md) (what survives a crash, and what does not), [docs/DEPLOY.md](docs/DEPLOY.md) and [frontend/README.md](frontend/README.md).
 
 <!-- Uncomment once docs/media/demo.gif exists (see docs/DEMO.md):
 ![AgentOS: a mission fanning out across workers](docs/media/demo.gif)

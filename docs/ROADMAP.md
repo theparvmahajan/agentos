@@ -8,7 +8,7 @@ Rule: `main` is always runnable. Every milestone ends in something demoable.
 | M1 Walking skeleton | models, LLM gateway, planner, 1 agent, sequential run | Weeks 1-2 | Done |
 | M2 Orchestration | DAG, Redis Streams workers, 3 agents, parallelism, sandboxed code execution | Weeks 3-5 | Done (`m2`) |
 | M3 Dashboard | WebSocket events, mission list and cancel, React Flow live graph, deploy (= v1) | Weeks 6-7 | Done (`m3`, v1): live events, dashboard, container deployment (demo gif pending) |
-| M4 Reliability | checkpoints, retries, timeouts, idempotency | Weeks 8-10 | Planned |
+| M4 Reliability | leases and crash recovery (done, #17), checkpoints, retries, timeouts, idempotency | Weeks 8-10 | In progress: see [RELIABILITY.md](RELIABILITY.md) |
 | M5 Security | capabilities, policy engine, tool guardrails | Weeks 11-13 | Planned |
 | M6 Human-in-the-loop | approvals, pause/resume | Weeks 14-15 | Planned |
 | M7 Observability | metrics, traces, cost tracking, evaluation suite | Weeks 16-18 | Planned |

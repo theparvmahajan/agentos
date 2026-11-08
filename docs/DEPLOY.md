@@ -112,10 +112,11 @@ docker compose -f docker-compose.prod.yml down -v          # stop AND DELETE the
 
 ## 6. Known limits of this deployment
 
-- **A restarted worker container gets a new consumer name** (names come from the container id), so a
-  message it had not finished is not picked up by its replacement. This is the known reliability gap
-  from the roadmap (a task stuck `running`); leases and reclaiming arrive in M4. If a mission hangs
-  after a worker restart, cancel it and start it again.
+- **A worker that dies is recovered, but not instantly.** Its task is retried after its lease
+  expires (about 40 s with the defaults) by the reaper in the scheduler. Its unfinished stream message
+  stays pending under the dead container's name (names come from the container id) until
+  `XAUTOCLAIM` is added; this is harmless because the reaper republishes the task. See
+  [RELIABILITY.md](RELIABILITY.md) for what is and is not covered.
 - No restore procedure is tested yet; `pg_dump` above is untested here beyond being the standard command.
 - Postgres and Redis have no passwords other than the compose-network isolation (`POSTGRES_PASSWORD`
   is set; Redis is not exposed and has none).
