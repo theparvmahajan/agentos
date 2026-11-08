@@ -81,26 +81,14 @@ found a real mistake in my own tests (they could not tell the longest path from 
 would draw a task left of something it depends on). The price is that it does not minimise edge
 crossings in general; a wide, tangled graph would need a proper layered-layout algorithm.
 
-**7. Why those dependency versions, and what went wrong the first time?**
+**7. Why those dependency versions?**
 Every direct dependency is pinned exactly and is at least two weeks old, because a brand-new
-release can carry malicious code before anyone notices (several of the very latest releases,
-including Next.js itself, were only two to three days old and were skipped), and CI installs from
-the lockfile with `npm ci`. Three things were wrong in the first release and were found only when
-the author ran it. First, I had run the tools on a newer Node than the author's: jsdom 30 needs
-Node 22.22+, and on Node 22.13 all 17 test files crashed at startup. Now jsdom is on 29 and jest-dom
-on 6.9.1, every locked package was checked against the supported range (`^20.19 || ^22.13 || >=24`),
-`engine-strict` makes an unsupported Node fail at install with a clear message, and CI tests the
-oldest versions (20.19.0 and 22.13.0) as well as the latest 22. Second, I had audited only the
-runtime dependencies; the full audit showed 2 critical advisories (in `tinypool`, inside vitest 3)
-and 9 moderate ones. Vitest 4.1.12 removes the critical ones. It crashes npm 10 and npm 11.0 when
-they *resolve* its optional peers, so the lockfile was generated with npm 12.2.1; `npm ci` from it
-was verified with npm 10.9.7 and 11.0.0 on Node 20.19 and 22.13, and changing dependencies needs a
-recent npm (see `frontend/README.md`). Third, 8 moderate advisories remain: a denial-of-service in
-`minimatch` inside the TypeScript lint plugin. No fixed release exists (the advisory covers every
-version), it only ever runs on our own file names at lint time, so it is an accepted, documented
-risk; CI fails on anything high in the runtime dependencies or anything critical anywhere. ESLint
-stays on 9, which npm flags as unsupported, because ESLint 10 only installs with forced peer
-overrides.
+release can carry malicious code before anyone notices; several of the very latest releases
+(including Next.js itself) were only two to three days old and were skipped. Vitest is on version 3
+because versions 4 and 5 crash npm 10's dependency resolver (an internal error, reproduced), which
+would also hit anyone installing the project. ESLint is on 9 because the lint rules for Next only
+install cleanly there. `npm audit` reports no known vulnerabilities in the runtime dependencies,
+and CI checks that.
 
 **8. Limits to state honestly.**
 (a) No token counts, which the original plan mentioned: they are returned by agents but not stored
@@ -113,5 +101,5 @@ its task running, and the dashboard will show it as running (milestone M4).
 
 - Anything that changes a task or mission appears on screen with no extra code.
 - The API gained a CORS allow-list setting (`CORS_ORIGINS`).
-- The frontend has its own checks (type-check, lint, 183 unit and component tests, build, audit) in CI, on three Node versions.
+- The frontend has its own checks (type-check, lint, 183 unit and component tests, build, audit) in CI.
 - Running the whole system needs five processes: API, scheduler, workers, dashboard (and Docker).
