@@ -2,6 +2,8 @@
 
 Base path: `/api/v1`. Interactive docs for the REST part: `/docs` (OpenAPI). Errors are
 `{"detail": "..."}`. There is no authentication yet (milestone M5): bind the API to localhost.
+Browsers may call it only from the origins in the `CORS_ORIGINS` setting (default: the dashboard on
+localhost:3000); the WebSocket is not covered by CORS and does not check its origin.
 
 ## REST
 

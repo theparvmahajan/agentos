@@ -9,4 +9,8 @@ node_modules/
 .next/
 *.log
 .DS_Store
-
+.env.local
+*.tsbuildinfo
+next-env.d.ts
+frontend/coverage/
+npm-debug.log*

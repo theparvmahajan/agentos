@@ -15,10 +15,20 @@ class Settings(BaseSettings):
     openai_base_url: str = ""
     openai_api_key: str = ""
     tavily_api_key: str = ""  # secrets live in .env only, never as defaults here
-
-    code_exec_backend: str = "docker"      # "docker" (isolated) or "local" (NO isolation)
+    # Where agent-written code runs: "docker" (isolated container, the default) or "local"
+    # (a plain subprocess on THIS machine, no isolation; only for when you accept that risk).
+    code_exec_backend: str = "docker"
     code_exec_image: str = "python:3.12-slim"
-    @field_validator("llm_provider", "llm_model", "code_exec_backend", "code_exec_image", mode="before")
+    # Browser origins allowed to call the API (comma separated). The dashboard's address.
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [o.strip().rstrip("/") for o in self.cors_origins.split(",") if o.strip()]
+
+    @field_validator(
+        "llm_provider", "llm_model", "code_exec_backend", "code_exec_image", mode="before"
+    )
     @classmethod
     def _strip(cls, value: object) -> object:
         """A stray space in .env (or a default) breaks model lookups; remove it."""

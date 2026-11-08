@@ -2,7 +2,9 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from core.config import settings
 from core.logging_setup import configure_logging
 from services.api.missions import router as missions_router
 from services.api.stream import EventHub, make_listener
@@ -27,7 +29,17 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(listener.join, 3)
 
 
-app = FastAPI(title="AgentOS", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="AgentOS", version="0.3.0", lifespan=lifespan)
+# Lets the dashboard (a different origin) call the API from the browser. Only the listed origins,
+# only the methods and header the dashboard uses, and no cookies. WebSockets are not covered by
+# CORS; the feed is read-only and unauthenticated until milestone M5.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+    expose_headers=["Location"],
+)
 app.include_router(missions_router)
 app.include_router(stream_router)
 
