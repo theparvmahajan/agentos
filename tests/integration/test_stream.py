@@ -90,8 +90,16 @@ def test_a_task_change_arrives_as_its_complete_current_state(
              output="the answer")
 
         seen = []
-        while not (seen and seen[-1]["task"]["status"] == "completed"):
-            seen.append(feed.next())
+        while not any(
+            message.get("type") == "task"
+            and message.get("task", {}).get("status") == "completed"
+            for message in seen
+        ):
+            message = feed.next()
+            # Mission-level notifications (including a delayed notification from setup)
+            # are valid stream events; this assertion is specifically about task state.
+            if message.get("type") == "task":
+                seen.append(message)
 
     last = seen[-1]
     assert last["type"] == "task" and last["mission_id"] == str(mission_id)
@@ -111,7 +119,10 @@ def test_a_streamed_task_is_identical_to_the_same_task_from_the_rest_endpoint(
         move(test_db_url, ids["a"], TaskStatus.READY, TaskStatus.RUNNING, TaskStatus.COMPLETED,
              output="same")
         message = feed.next()
-        while message["task"]["status"] != "completed":
+        while (
+            message.get("type") != "task"
+            or message.get("task", {}).get("status") != "completed"
+        ):
             message = feed.next()
 
     rest = client.get(f"/api/v1/missions/{mission_id}").json()
