@@ -57,7 +57,7 @@ make up                           # postgres + redis
 make migrate && make seed         # schema and the three agents (migrate gives up after 10 s
                                   # and names the blocking session if a table is locked)
 make sandbox                      # one-time: pull the code-execution image (needs Docker)
-make web-install                  # one-time: the dashboard's dependencies (Node 20.19+ or 22.13+)
+make web-install                  # one-time: the dashboard's dependencies (needs Node 20.9+)
 make test
 make web-check                    # the dashboard's type-check, lint and tests
 ```
