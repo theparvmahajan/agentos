@@ -1,4 +1,4 @@
-.PHONY: up down run test lint migrate seed serve scheduler worker sandbox bench
+.PHONY: up down run test lint migrate seed serve scheduler worker sandbox bench web-install web web-check web-build
 up:
 	docker compose up -d
 down:
@@ -23,3 +23,13 @@ sandbox:
 	docker pull python:3.12-slim
 bench:
 	python -m scripts.benchmark
+web-install:
+	npm --prefix frontend ci
+web:
+	npm --prefix frontend run dev
+web-check:
+	npm --prefix frontend run typecheck
+	npm --prefix frontend run lint
+	npm --prefix frontend test
+web-build:
+	npm --prefix frontend run build
