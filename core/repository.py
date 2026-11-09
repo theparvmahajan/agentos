@@ -541,6 +541,9 @@ def claim_due_ready(
     task_dispatch row at all (the scheduler crashed before writing one) counts as due with no
     message, so it is found too.
     """
+    # Serialize concurrent sweepers. This must be a separate SQL statement
+    # so the claim query gets a fresh READ COMMITTED snapshot after the lock.
+    conn.execute("SELECT pg_advisory_xact_lock(73421, 1)")
     rows = conn.execute(
         """
         WITH due AS (
