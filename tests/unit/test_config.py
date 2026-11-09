@@ -46,3 +46,24 @@ def test_a_heartbeat_of_exactly_half_the_lease_is_accepted():
 def test_the_reaper_interval_must_be_positive():
     with pytest.raises(ValidationError, match="REAPER_INTERVAL_SECONDS"):
         Settings(_env_file=None, reaper_interval_seconds=0)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "retry_base_seconds",
+        "retry_max_seconds",
+        "sweep_interval_seconds",
+        "ready_republish_seconds",
+        "task_timeout_scale",
+    ],
+)
+def test_retry_timing_settings_must_be_positive(name):
+    with pytest.raises(ValidationError, match=name.upper()):
+        Settings(_env_file=None, **{name: 0})
+
+
+def test_the_retry_cap_cannot_be_below_the_base():
+    with pytest.raises(ValidationError, match="RETRY_MAX_SECONDS"):
+        Settings(_env_file=None, retry_base_seconds=10, retry_max_seconds=5)
+

@@ -9,7 +9,7 @@ localhost:3000); the WebSocket is not covered by CORS and does not check its ori
 
 | Method and path | Purpose | Success | Errors |
 |---|---|---|---|
-| `POST /missions` | Create a mission from `{"objective": "..."}` (1-2000 chars). Planning starts in the background. | `202` + `Location` header + the mission | `422` invalid body |
+| `POST /missions` | Create a mission from `{"objective": "..."}` (1-2000 chars). Planning starts in the background. | `202` + `Location` header + the mission | `422` invalid body or `Idempotency-Key`; `409` key reused with a different objective |
 | `GET /missions` | List missions, newest first. Query: `limit` (1-100, default 20), `cursor`, `status`. | `200` page | `422` bad cursor / limit / status |
 | `GET /missions/{id}` | One mission with all its tasks, dependencies first. | `200` | `404`, `422` bad id |
 | `POST /missions/{id}/cancel` | Cancel a mission that has not finished. | `200` the cancelled mission | `404`, `409` already finished, `422` |
@@ -24,6 +24,26 @@ A task's `status` is one of `pending, ready, running, completed, failed, skipped
 `?cursor=` for the next page; `null` means there is none. Items carry `tasks_total` and
 `tasks_completed` instead of the tasks themselves. A cursor names the last row you received, so
 missions created while you page never cause repeats or gaps. Treat cursors as opaque.
+
+### Repeating a request safely: `Idempotency-Key`
+
+`POST /missions` accepts an optional `Idempotency-Key` header (1 to 255 visible ASCII characters, no
+spaces; a UUID is a good choice). Without it, every request creates a mission. With it, the first
+request creates the mission and **sending the same key again returns that same mission** instead of
+making a second one, with the response header `Idempotent-Replay: true`, and nothing new is started.
+Use it whenever a retry is possible: a client that timed out cannot know whether the mission was
+created.
+
+- The same key with a *different* objective is refused with `409`: it is a client bug, and returning
+  the wrong mission silently would hide it.
+- A replay shows the mission as it is now (its current status and tasks), not as it was.
+- Keys are kept as long as the mission exists. A key is private to a tenant (today: one tenant).
+
+```bash
+curl -X POST localhost:8000/api/v1/missions -H "Content-Type: application/json" \
+     -H "Idempotency-Key: 7c9e6679-7425-40de-944b-e07fc1f90ae7" -d '{"objective": "compare Redis and Postgres queues"}'
+# run it twice: same mission id both times; the second response has "Idempotent-Replay: true"
+```
 
 ### Cancelling
 

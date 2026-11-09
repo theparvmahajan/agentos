@@ -11,6 +11,8 @@ from core.models import MissionStatus, TaskStatus
 from core.reaper import reap_expired
 from core.scheduler import schedule_mission
 from core.state import InvalidTransition
+from core.sweeper import sweep_ready
+from tests.integration.conftest import dispatch_of, make_due
 
 TTL = 30.0
 
@@ -97,6 +99,7 @@ def test_a_stale_attempt_cannot_overwrite_the_retry(test_db_url, lease_mission, 
     claim(test_db_url, ids["a"], owner="zombie")  # attempt 1
     expire_lease(test_db_url, ids["a"])
     assert reap(test_db_url, queues).requeued == (ids["a"],)
+    make_due(test_db_url, ids["a"])  # skip the backoff wait
     second = claim(test_db_url, ids["a"], owner="healthy")  # attempt 2
     assert second.attempts == 2
     lease = lease_of(test_db_url, ids["a"])
@@ -131,7 +134,7 @@ def test_only_expired_leases_are_candidates_for_recovery(test_db_url, lease_miss
     assert found == [(ids["dead"], 1)]
 
 
-def test_an_expired_lease_with_attempts_left_is_requeued_and_republished(
+def test_an_expired_lease_with_attempts_left_is_requeued_with_a_delay_and_published_by_the_sweeper(
     test_db_url, lease_mission, queues
 ):
     mission_id, ids = lease_mission()
@@ -144,6 +147,14 @@ def test_an_expired_lease_with_attempts_left_is_requeued_and_republished(
     task = task_of(test_db_url, ids["a"])
     assert task.status == TaskStatus.READY and task.attempts == 1
     assert "lease expired" in task.last_error
+    # The reaper only records the retry: not yet runnable, nothing published.
+    dispatch = dispatch_of(test_db_url, ids["a"])
+    assert dispatch["enqueued_at"] is None and dispatch["run_after"] is not None
+    assert queues.tasks.length() == 0
+    assert sweep_ready(queues, database_url=test_db_url).published == ()  # still waiting
+
+    make_due(test_db_url, ids["a"])  # the delay is over
+    assert sweep_ready(queues, database_url=test_db_url).published == (ids["a"],)
     [message] = queues.tasks.read("w")
     assert message.fields == {"mission_id": str(mission_id), "task_id": str(ids["a"])}
 
@@ -234,5 +245,8 @@ def test_two_reapers_racing_recover_a_task_exactly_once(test_db_url, lease_missi
         t.join(10)
 
     assert sum(len(r.requeued) for r in reports) == 1
+    assert queues.tasks.length() == 0  # the reapers publish nothing; the sweeper does
+    make_due(test_db_url, ids["a"])
+    assert sweep_ready(queues, database_url=test_db_url).published == (ids["a"],)
     assert queues.tasks.length() == 1  # one message, not two
     assert task_of(test_db_url, ids["a"]).status == TaskStatus.READY

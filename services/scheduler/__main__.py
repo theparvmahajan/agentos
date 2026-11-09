@@ -18,7 +18,11 @@ def main() -> None:
     # To run several on one machine, give each its own SCHEDULER_NAME.
     consumer = os.environ.get("SCHEDULER_NAME") or f"scheduler@{socket.gethostname()}"
     run_scheduler(
-        build_queues(), consumer=consumer, stop=stop, reap_interval=settings.reaper_interval_seconds
+        build_queues(),
+        consumer=consumer,
+        stop=stop,
+        reap_interval=settings.reaper_interval_seconds,
+        sweep_interval=settings.sweep_interval_seconds,
     )
 
 

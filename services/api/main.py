@@ -37,8 +37,8 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
     allow_methods=["GET", "POST"],
-    allow_headers=["Content-Type"],
-    expose_headers=["Location"],
+    allow_headers=["Content-Type", "Idempotency-Key"],
+    expose_headers=["Location", "Idempotent-Replay"],
 )
 app.include_router(missions_router)
 app.include_router(stream_router)

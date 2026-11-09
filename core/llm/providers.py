@@ -18,9 +18,15 @@ def _post_json(
         return resp.json()
     except httpx.HTTPStatusError as e:
         body = " ".join(e.response.text.split())[:300] or "no response body"
-        raise LLMError(f"{name} returned HTTP {e.response.status_code}: {body}") from e
+        status = e.response.status_code
+        # 429 (rate limited) and 5xx (the server is struggling) pass with time; other 4xx are our
+        # mistake (bad key, bad request) and would fail again.
+        raise LLMError(
+            f"{name} returned HTTP {status}: {body}", retryable=status == 429 or status >= 500
+        ) from e
     except httpx.HTTPError as e:
-        raise LLMError(f"{name} request failed: {e}") from e
+        # Timeouts and connection failures: the server may be restarting or briefly unreachable.
+        raise LLMError(f"{name} request failed: {e}", retryable=True) from e
     except ValueError as e:
         raise LLMError(f"{name} returned invalid JSON: {e}") from e
 

@@ -4,12 +4,13 @@ A worker holds a lease on the task it runs and renews it (heartbeat). When the w
 the renewals stop, the lease expires, and a pass of `reap_expired` finds the task still marked
 `running`:
 
-    attempts left   -> running -> ready, then publish it again   (a retry)
-    no attempts left -> running -> failed, then announce it       (the scheduler skips dependents)
+    attempts left   -> running -> ready, to run again after a backoff delay   (a retry)
+    no attempts left -> running -> failed, then announce it    (the scheduler skips dependents)
 
-Order of side effects follows the rest of the system: commit the state change FIRST, publish
-SECOND. A crash between the two leaves a task `ready` that nobody was told about; that window is
-a known gap (a sweeper for stale `ready` tasks is planned), not something this module hides.
+A requeued task is NOT published here. It is `ready` with a `run_after` time, and the sweeper
+(core/sweeper.py) publishes it when that time has passed. That keeps one rule for "put a ready task
+on the queue", and means a crash right after the requeue loses nothing: the sweeper finds the task.
+(The `failed` branch still announces an event; a lost announcement there is a known gap.)
 
 Any number of reapers may run at once: each recovery is one guarded UPDATE, so a task is
 recovered exactly once.
@@ -28,6 +29,7 @@ from core import repository as repo
 from core.config import settings
 from core.db import get_conn
 from core.queue import Queues
+from core.retry import Backoff
 
 log = logging.getLogger(__name__)
 
@@ -46,8 +48,10 @@ def reap_expired(
     lease_seconds: float | None = None,
     database_url: str | None = None,
     limit: int = 50,
+    backoff: Backoff | None = None,
 ) -> ReapReport:
     lease_seconds = settings.task_lease_seconds if lease_seconds is None else lease_seconds
+    backoff = backoff or Backoff.from_settings()
     with get_conn(database_url) as conn:
         orphans = repo.find_orphaned_tasks(conn, lease_seconds=lease_seconds, limit=limit)
 
@@ -57,16 +61,20 @@ def reap_expired(
         reason = LEASE_EXPIRED.format(seconds=lease_seconds)
         with get_conn(database_url) as conn:  # one short transaction per task
             recovered = repo.recover_orphaned_task(
-                conn, task_id, attempt, lease_seconds=lease_seconds, reason=reason
+                conn,
+                task_id,
+                attempt,
+                lease_seconds=lease_seconds,
+                reason=reason,
+                retry_delay=backoff.delay(attempt),
             )
         if recovered is None:
             continue  # it finished, was renewed, or another reaper took it
         action, task = recovered
         if action == "requeued":
-            queues.publish_task(task.mission_id, task.id)
             requeued.append(task.id)
             log.warning(
-                "task %s: %s; requeued (attempt %d of %d used)",
+                "task %s: %s; will retry (attempt %d of %d used)",
                 task.key, reason, task.attempts, task.max_attempts,
             )
         else:

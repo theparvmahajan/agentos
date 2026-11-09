@@ -11,11 +11,13 @@ from core import repository as repo
 from core.db import get_conn
 from core.models import MissionStatus, TaskStatus
 from core.reaper import reap_expired
+from core.retry import Backoff
 from core.runner import AgentResult
 from core.scheduler import run_scheduler, schedule_mission
+from core.sweeper import sweep_ready
 from core.tools import ToolRegistry
 from core.worker import Outcome, handle_task_message, run_worker
-from tests.integration.conftest import LEASE_AGENT, wait_until
+from tests.integration.conftest import LEASE_AGENT, make_due, wait_until
 
 
 def task_of(url, task_id):
@@ -128,6 +130,8 @@ def test_a_worker_that_wakes_up_late_cannot_overwrite_the_retry(test_db_url, que
     time.sleep(0.7)
 
     assert reap_expired(queues, lease_seconds=0.5, database_url=test_db_url).requeued == (ids["a"],)
+    make_due(test_db_url, ids["a"])
+    sweep_ready(queues, database_url=test_db_url)
     [second] = queues.tasks.read("healthy")
     assert handle(
         test_db_url, queues, second, runner_returning("from the healthy worker"), consumer="healthy"
@@ -172,6 +176,8 @@ def test_a_zombie_that_finishes_while_the_retry_is_still_running_is_refused(
     assert wait_until(lambda: task_of(test_db_url, ids["a"]).status == TaskStatus.RUNNING)
     time.sleep(0.7)
     assert reap_expired(queues, lease_seconds=0.5, database_url=test_db_url).requeued == (ids["a"],)
+    make_due(test_db_url, ids["a"])
+    sweep_ready(queues, database_url=test_db_url)
     [second] = queues.tasks.read("healthy")
     healthy = threading.Thread(
         target=lambda: results.update(healthy=handle(
@@ -202,6 +208,7 @@ def test_a_task_that_keeps_losing_its_worker_ends_up_failed_not_looping_forever(
     mission_id, ids = lease_mission(max_attempts=2)
     for expected_attempt in (1, 2):
         with get_conn(test_db_url) as conn:  # a worker claims it and dies at once
+            make_due(test_db_url, ids["a"])  # (a no-op the first time: no retry is waiting yet)
             repo.claim_task(conn, ids["a"], "doomed", 30)
             conn.execute("UPDATE task_leases SET expires_at = now() - interval '1 s'")
         report = reap_expired(queues, lease_seconds=30, database_url=test_db_url)
@@ -231,6 +238,7 @@ def test_killing_a_worker_process_mid_task_does_not_lose_the_mission(
     scheduler_stop, scheduler = start_thread(
         run_scheduler, queues=queues, consumer="sched", database_url=test_db_url,
         block_ms=100, reap_interval=0.3, lease_seconds=1.5,
+        sweep_interval=0.2, backoff=Backoff(0.05, 0.1),  # retries wait milliseconds, not seconds
     )
     stops.append((scheduler_stop, scheduler))
     child = subprocess.Popen(

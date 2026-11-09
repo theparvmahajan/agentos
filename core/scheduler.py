@@ -14,7 +14,9 @@ from core.queue import Message, Queues
 from core.readiness import nodes_from_tasks, plan_next
 from core.reaper import reap_expired
 from core.results import compose_result, describe_failure, in_dependency_order
+from core.retry import Backoff
 from core.state import InvalidTransition
+from core.sweeper import sweep_ready
 
 log = logging.getLogger(__name__)
 
@@ -121,26 +123,40 @@ def run_scheduler(
     retry_delay: float = 1.0,
     reap_interval: float | None = None,
     lease_seconds: float | None = None,
+    sweep_interval: float | None = None,
+    republish_after: float | None = None,
+    backoff: Backoff | None = None,
 ) -> None:
     """Wake up on mission events and run a scheduling pass for each mission mentioned.
 
     With `reap_interval` set, the same loop also recovers tasks whose worker died every that
-    many seconds (see core/reaper.py). Several schedulers may reap at once; it is race-safe.
+    many seconds (see core/reaper.py); with `sweep_interval` set it also publishes READY tasks
+    that are due and have no queue message (see core/sweeper.py): retries whose backoff is over,
+    and anything whose message was lost. Several schedulers may do either at once; both are
+    race-safe.
 
     Several copies can run at once (use a different `consumer` name for each): the consumer
     group hands every event to exactly one of them.
     """
     queues.ensure_groups()
     log.info("scheduler %s started", consumer)
-    next_reap = time.monotonic()
+    next_reap = next_sweep = time.monotonic()
 
     while not stop.is_set():
         if reap_interval is not None and time.monotonic() >= next_reap:
             next_reap = time.monotonic() + reap_interval
             try:
-                reap_expired(queues, lease_seconds=lease_seconds, database_url=database_url)
+                reap_expired(
+                    queues, lease_seconds=lease_seconds, database_url=database_url, backoff=backoff
+                )
             except Exception:  # logged below; the next interval tries again
                 log.exception("reaper pass failed")
+        if sweep_interval is not None and time.monotonic() >= next_sweep:
+            next_sweep = time.monotonic() + sweep_interval
+            try:
+                sweep_ready(queues, republish_after=republish_after, database_url=database_url)
+            except Exception:  # logged below; the next interval tries again
+                log.exception("sweeper pass failed")
         try:
             # First anything we received before but never acknowledged (a failed pass, a restart),
             # then wait for new events.
