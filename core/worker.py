@@ -13,6 +13,7 @@ from core.db import get_conn
 from core.llm import LLMProvider
 from core.models import Task, TaskStatus
 from core.queue import Message, Queues
+from core.retry import Backoff, TaskTimeout, is_retryable
 from core.runner import DependencyOutput, Runner
 from core.state import TASK_TERMINAL, InvalidTransition
 from core.tools import ToolRegistry
@@ -26,6 +27,7 @@ class Outcome(str, Enum):
     DUPLICATE = "duplicate"  # nothing to run: someone else has the task, or it already finished
     DROPPED = "dropped"  # malformed message, or a task that does not exist
     DISCARDED = "discarded"  # the task was cancelled while it ran: its result is thrown away
+    RETRYING = "retrying"  # a transient failure: the task will run again after a backoff delay
 
 
 def _handle_duplicate(
@@ -92,6 +94,65 @@ class LeaseKeeper:
                 return
 
 
+def _run_with_timeout(call, timeout: float):
+    """Run `call()` and give up waiting after `timeout` seconds (raises TaskTimeout).
+
+    Python cannot kill a thread, so a runner that is truly stuck is ABANDONED, not stopped: its
+    thread keeps going until the blocking call it is in returns. That is bounded: an LLM request
+    has its own timeout (LLM_TIMEOUT_SECONDS) and the code sandbox kills its container after its
+    own limit. When the abandoned thread finally returns, its result is refused by the fencing
+    check (the attempt is over), so it cannot change anything. docs/RELIABILITY.md lists this.
+    """
+    box: dict = {}
+
+    def target() -> None:
+        try:
+            box["result"] = call()
+        except BaseException as e:  # noqa: BLE001 - handed to the caller below
+            box["error"] = e
+
+    thread = threading.Thread(target=target, name="task-runner", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TaskTimeout(f"timed out after {timeout:g}s")
+    if "error" in box:
+        raise box["error"]
+    return box["result"]
+
+
+def _fail_or_retry(
+    database_url: str | None,
+    task: Task,
+    attempt: int,
+    error: str,
+    *,
+    retryable: bool,
+    backoff: Backoff,
+) -> Outcome:
+    """A failed attempt: retry later if the failure is transient and attempts remain, else fail.
+
+    "Attempts remain" is decided in ONE place, the database: schedule_retry only matches while
+    attempts < max_attempts, and returns None otherwise.
+    """
+    if retryable:
+        delay = backoff.delay(attempt)
+        with get_conn(database_url) as conn:
+            scheduled = repo.schedule_retry(
+                conn, task.id, attempt, error=error, delay_seconds=delay
+            )
+        if scheduled is not None:
+            log.warning(
+                "task %s: attempt %d of %d failed (%s); retrying in %.1fs",
+                task.key, attempt, task.max_attempts, error, delay,
+            )
+            return Outcome.RETRYING
+        # Nothing matched: no attempts left, or cancelled, or handed to another worker. Fall
+        # through to the guarded FAILED write, which discards the result in the last two cases.
+        error = f"{error} (gave up after {attempt} of {task.max_attempts} attempts)"
+    return _record(database_url, task, attempt, TaskStatus.FAILED, Outcome.FAILED, error=error)
+
+
 def _record(
     database_url: str | None,
     task: Task,
@@ -123,6 +184,8 @@ def handle_task_message(
     consumer: str = "worker",
     lease_seconds: float | None = None,
     heartbeat_seconds: float | None = None,
+    backoff: Backoff | None = None,
+    timeout_seconds: float | None = None,
 ) -> Outcome:
     """Run the task a message points at, record the result, announce it, acknowledge the message.
 
@@ -147,6 +210,7 @@ def handle_task_message(
         queues.tasks.ack(message.id)
         return Outcome.DROPPED
 
+    backoff = backoff or Backoff.from_settings()
     lease_seconds = settings.task_lease_seconds if lease_seconds is None else lease_seconds
     heartbeat_seconds = (
         settings.lease_heartbeat_seconds if heartbeat_seconds is None else heartbeat_seconds
@@ -163,6 +227,11 @@ def handle_task_message(
 
     by_id = {t.id: t for t in mission_tasks}
     agent = agents[task.agent_id]
+    timeout = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else agent.timeout_seconds * settings.task_timeout_scale
+    )
     log.info("task %s (%s) running on %s", task.key, task.mission_id, agent.name)
     started = time.perf_counter()
 
@@ -182,12 +251,17 @@ def handle_task_message(
             interval=heartbeat_seconds,
             database_url=database_url,
         ):
-            result = runner(agent, task.instruction, dependencies, tools=tools, provider=provider)
+            result = _run_with_timeout(
+                lambda: runner(
+                    agent, task.instruction, dependencies, tools=tools, provider=provider
+                ),
+                timeout,
+            )
     except Exception as e:  # noqa: BLE001 - any runner failure is recorded on the task
         error = f"{type(e).__name__}: {e}"
         log.warning("task %s failed after %.1fs: %s", task.key, time.perf_counter() - started, error)
-        outcome = _record(
-            database_url, task, attempt, TaskStatus.FAILED, Outcome.FAILED, error=error
+        outcome = _fail_or_retry(
+            database_url, task, attempt, error, retryable=is_retryable(e), backoff=backoff
         )
     else:
         outcome = _record(
@@ -209,7 +283,10 @@ def handle_task_message(
 
     # Order matters: the result is committed above, THEN announced, THEN the message is
     # acknowledged. A crash between any two steps is recovered when the message is redelivered.
-    queues.publish_event(task.mission_id, task_id)
+    # A task going back for a retry has nothing to announce: the scheduler has nothing to decide
+    # until it finishes, and the sweeper (not this worker) will publish it when it is due.
+    if outcome is not Outcome.RETRYING:
+        queues.publish_event(task.mission_id, task_id)
     queues.tasks.ack(message.id)
     return outcome
 
@@ -227,6 +304,8 @@ def run_worker(
     retry_delay: float = 1.0,
     lease_seconds: float | None = None,
     heartbeat_seconds: float | None = None,
+    backoff: Backoff | None = None,
+    timeout_seconds: float | None = None,
 ) -> None:
     """Take tasks off the stream one at a time. Run several of these (processes or threads, each
     with its own `consumer` name) to run tasks in parallel: the consumer group gives every
@@ -258,6 +337,8 @@ def run_worker(
                     consumer=consumer,
                     lease_seconds=lease_seconds,
                     heartbeat_seconds=heartbeat_seconds,
+                    backoff=backoff,
+                    timeout_seconds=timeout_seconds,
                 )
             except Exception:  # keeps the worker alive; the message stays pending and is retried
                 log.exception("task message %s could not be handled; will retry", message.id)

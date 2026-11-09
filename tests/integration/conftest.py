@@ -9,6 +9,21 @@ from core.models import MissionStatus, TaskStatus
 LEASE_AGENT = "lease-test-agent"
 
 
+def make_due(url, task_id):
+    """Skip a retry's backoff wait: the task may run now."""
+    with get_conn(url) as conn:
+        conn.execute(
+            "UPDATE task_dispatch SET run_after = now() - interval '1 second' WHERE task_id = %s",
+            (task_id,),
+        )
+
+
+def dispatch_of(url, task_id):
+    """The task's task_dispatch row (run_after, enqueued_at), or None."""
+    with get_conn(url) as conn:
+        return conn.execute("SELECT * FROM task_dispatch WHERE task_id = %s", (task_id,)).fetchone()
+
+
 def wait_until(condition, timeout=10.0):
     """Poll instead of sleeping a fixed time."""
     deadline = time.time() + timeout

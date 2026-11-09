@@ -1,7 +1,9 @@
+import hashlib
+import re
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Response
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query, Response
 
 from core import repository as repo
 from core.db import get_conn
@@ -13,6 +15,9 @@ from services.api.views import to_mission_out, to_summary
 
 router = APIRouter(prefix="/api/v1/missions", tags=["missions"])
 
+# Visible ASCII, no spaces, 1 to 255 characters: easy to log, safe in a header, roomy enough for a UUID.
+IDEMPOTENCY_KEY = re.compile(r"^[\x21-\x7e]{1,255}$")
+
 
 @router.post("", status_code=202, response_model=MissionOut)
 def create_mission(
@@ -21,13 +26,49 @@ def create_mission(
     response: Response,
     database_url: DatabaseUrl,
     launcher: LauncherDep,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            description=(
+                "Makes this request safe to repeat. Send the same key again (for example after a "
+                "timeout) and you get the mission the first request created instead of a second "
+                "one, with the header Idempotent-Replay: true. The same key with a different "
+                "objective is refused with 409."
+            )
+        ),
+    ] = None,
 ) -> MissionOut:
-    with get_conn(database_url) as conn:
-        mission = repo.create_mission(conn, body.objective)
-    # The block above committed, so the background job is guaranteed to find the row.
-    background.add_task(launcher, mission.id)
+    if idempotency_key is not None and not IDEMPOTENCY_KEY.fullmatch(idempotency_key):
+        raise HTTPException(
+            status_code=422,
+            detail="Idempotency-Key must be 1 to 255 visible ASCII characters without spaces",
+        )
+    if idempotency_key is None:
+        with get_conn(database_url) as conn:
+            mission = repo.create_mission(conn, body.objective)
+        replay, tasks, agent_names = False, [], {}
+    else:
+        request_hash = hashlib.sha256(body.objective.encode()).hexdigest()
+        try:
+            with get_conn(database_url) as conn:
+                mission, created = repo.create_mission_idempotent(
+                    conn, body.objective, idempotency_key, request_hash
+                )
+                replay = not created
+                tasks = repo.get_tasks(conn, mission.id) if replay else []
+                agent_names = {a.id: a.name for a in repo.list_agents(conn)} if replay else {}
+        except repo.IdempotencyConflict as e:
+            raise HTTPException(
+                status_code=409,
+                detail="this Idempotency-Key was already used with a different objective",
+            ) from e
+    if not replay:
+        # The block above committed, so the background job is guaranteed to find the row.
+        background.add_task(launcher, mission.id)
+    else:
+        response.headers["Idempotent-Replay"] = "true"  # nothing new was started
     response.headers["Location"] = f"/api/v1/missions/{mission.id}"
-    return to_mission_out(mission, [], {})
+    return to_mission_out(mission, tasks, agent_names)
 
 
 @router.get("", response_model=MissionPage)

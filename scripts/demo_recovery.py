@@ -8,9 +8,9 @@ real worker process on private streams, then kills the worker with no warning (`
 SIGKILL on Linux/macOS, TerminateProcess on Windows, so the worker gets no chance to clean up).
 
 What you should see: the task is running under worker w1's lease; w1 dies; the lease stops being
-renewed and runs out; the scheduler's reaper puts the task back; worker w2 runs it as attempt 2;
-the mission completes. The lease is short here (3 s) so this takes about ten seconds; the default
-is 30 s.
+renewed and runs out; the scheduler's reaper puts the task back as `ready` with a short backoff delay; the sweeper
+publishes it when the delay is over; worker w2 runs it as attempt 2; the mission completes. The lease
+is short here (3 s) so this takes about fifteen seconds; the default is 30 s.
 """
 
 import os

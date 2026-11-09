@@ -180,6 +180,14 @@ def set_task_status(
             finished_at = CASE WHEN %s THEN now() ELSE finished_at END,
             updated_at = now()
         WHERE id = %s AND status = ANY(%s) AND (%s::int IS NULL OR attempts = %s::int)
+          -- a READY task still serving its retry delay cannot be claimed early (for example by a
+          -- stray duplicate message); the sweeper publishes it again when it is due
+          AND (
+              NOT %s OR status <> 'ready'
+              OR NOT EXISTS (
+                  SELECT 1 FROM task_dispatch d WHERE d.task_id = tasks.id AND d.run_after > now()
+              )
+          )
         RETURNING *
         """,
         (
@@ -193,8 +201,14 @@ def set_task_status(
             [s.value for s in allowed_sources(new_status)],
             attempt,
             attempt,
+            is_running,
         ),
     ).fetchone()
+    if row is not None:
+        if is_running:  # claimed: any delay is served and the message is consumed
+            conn.execute("DELETE FROM task_dispatch WHERE task_id = %s", (task_id,))
+        elif new_status == TaskStatus.READY:  # the caller is about to publish a message
+            _stamp_dispatch(conn, task_id, run_after_seconds=None, enqueued=True)
 
     if row is None:
         current = conn.execute(
@@ -282,7 +296,13 @@ def find_orphaned_tasks(
 
 
 def recover_orphaned_task(
-    conn: psycopg.Connection, task_id: UUID, attempt: int, *, lease_seconds: float, reason: str
+    conn: psycopg.Connection,
+    task_id: UUID,
+    attempt: int,
+    *,
+    lease_seconds: float,
+    reason: str,
+    retry_delay: float = 0.0,
 ) -> tuple[str, Task] | None:
     """Requeue or fail one orphaned task. Returns ("requeued"|"failed", task), or None if the
     task was no longer orphaned (it finished, was renewed, or another reaper got there first).
@@ -312,6 +332,8 @@ def recover_orphaned_task(
         params,
     ).fetchone()
     if row is not None:
+        # No message is published here: the sweeper does it once the delay is over.
+        _stamp_dispatch(conn, task_id, run_after_seconds=retry_delay, enqueued=False)
         return "requeued", Task(**row, depends_on=[])
     row = conn.execute(
         f"""
@@ -350,6 +372,27 @@ def finish_mission_if_running(
         (status.value, result, error, mission_id),
     ).fetchone()
     return Mission(**row) if row else None
+
+
+def _stamp_dispatch(
+    conn: psycopg.Connection, task_id: UUID, *, run_after_seconds: float | None, enqueued: bool
+) -> None:
+    """Record when a READY task may run (now + run_after_seconds, or now) and whether a queue
+    message for it has just been published."""
+    conn.execute(
+        """
+        INSERT INTO task_dispatch (task_id, run_after, enqueued_at)
+        VALUES (
+            %(id)s,
+            CASE WHEN %(delay)s::float IS NULL THEN NULL
+                 ELSE now() + make_interval(secs => %(delay)s::float) END,
+            CASE WHEN %(enqueued)s THEN now() ELSE NULL END
+        )
+        ON CONFLICT (task_id) DO UPDATE
+        SET run_after = EXCLUDED.run_after, enqueued_at = EXCLUDED.enqueued_at
+        """,
+        {"id": task_id, "delay": run_after_seconds, "enqueued": enqueued},
+    )
 
 
 def get_task(conn: psycopg.Connection, task_id: UUID) -> Task | None:
@@ -456,3 +499,128 @@ def list_missions(
         (*params, limit),
     ).fetchall()
     return [MissionSummary(**r) for r in rows]
+
+
+# ---------- retries and the sweeper ----------
+
+
+def schedule_retry(
+    conn: psycopg.Connection, task_id: UUID, attempt: int, *, error: str, delay_seconds: float
+) -> Task | None:
+    """RUNNING -> READY, to run again after `delay_seconds`. Fenced to the attempt that failed.
+
+    Returns None when nothing matched: the task was cancelled, handed to another worker, or has
+    no attempts left. The caller tells these apart by reading the task.
+    The waiting is stored in task_dispatch.run_after, so it survives a restart of every process.
+    No message is published here: the sweeper publishes the task when the delay has passed.
+    """
+    row = conn.execute(
+        """
+        UPDATE tasks
+        SET status = 'ready', last_error = %s, updated_at = now()
+        WHERE id = %s AND status = 'running' AND attempts = %s AND attempts < max_attempts
+        RETURNING *
+        """,
+        (error, task_id, attempt),
+    ).fetchone()
+    if row is None:
+        return None
+    _stamp_dispatch(conn, task_id, run_after_seconds=delay_seconds, enqueued=False)
+    return Task(**row, depends_on=[])
+
+
+def claim_due_ready(
+    conn: psycopg.Connection, *, republish_after: float, limit: int = 100
+) -> list[tuple[UUID, UUID]]:
+    """(mission id, task id) of READY tasks that are due and have no recent queue message, and
+    stamp them `enqueued_at = now()` so that no other sweeper takes them this round.
+
+    Concurrent sweepers split the work (SKIP LOCKED) and never both publish the same task.
+    Stamping BEFORE publishing means a crash between the two costs one `republish_after` of
+    waiting (then the task is picked up again), never a lost task. A READY task with no
+    task_dispatch row at all (the scheduler crashed before writing one) counts as due with no
+    message, so it is found too.
+    """
+    rows = conn.execute(
+        """
+        WITH due AS (
+            SELECT t.id, t.mission_id
+            FROM tasks t
+            LEFT JOIN task_dispatch d ON d.task_id = t.id
+            WHERE t.status = 'ready'
+              AND (d.run_after IS NULL OR d.run_after <= now())
+              AND (d.enqueued_at IS NULL OR d.enqueued_at <= now() - make_interval(secs => %s))
+            ORDER BY COALESCE(d.run_after, t.created_at)
+            LIMIT %s
+            FOR UPDATE OF t SKIP LOCKED
+        ),
+        stamped AS (
+            INSERT INTO task_dispatch (task_id, enqueued_at)
+            SELECT id, now() FROM due
+            ON CONFLICT (task_id) DO UPDATE SET enqueued_at = now()
+            RETURNING task_id
+        )
+        SELECT due.mission_id, due.id FROM due JOIN stamped ON stamped.task_id = due.id
+        """,
+        (republish_after, limit),
+    ).fetchall()
+    return [(r["mission_id"], r["id"]) for r in rows]
+
+
+# ---------- idempotent mission creation ----------
+
+NO_TENANT = UUID(int=0)  # the scope used while there is a single tenant (tenant_id is NULL)
+
+
+class IdempotencyConflict(Exception):
+    """The same Idempotency-Key was used with a different request."""
+
+
+class _KeyAlreadyUsed(Exception):
+    pass
+
+
+def create_mission_idempotent(
+    conn: psycopg.Connection,
+    objective: str,
+    key: str,
+    request_hash: str,
+    tenant_id: UUID | None = None,
+) -> tuple[Mission, bool]:
+    """Create the mission, or return the one this key already created: (mission, created).
+
+    The primary key of idempotency_keys decides, not a check-then-insert, so two identical
+    requests arriving at the same instant still create exactly one mission: the loser's INSERT
+    waits for the winner to commit, matches nothing, and its own mission (made inside a savepoint)
+    is rolled back. Raises IdempotencyConflict if the key exists with a different request.
+    """
+    scope = tenant_id or NO_TENANT
+    try:
+        with conn.transaction():  # a savepoint: undone as a whole if the key is taken
+            mission = create_mission(conn, objective, tenant_id)
+            claimed = conn.execute(
+                """
+                INSERT INTO idempotency_keys (scope, key, request_hash, mission_id)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (scope, key) DO NOTHING
+                RETURNING mission_id
+                """,
+                (scope, key, request_hash, mission.id),
+            ).fetchone()
+            if claimed is None:
+                raise _KeyAlreadyUsed
+        return mission, True
+    except _KeyAlreadyUsed:
+        row = conn.execute(
+            """
+            SELECT m.*, k.request_hash AS stored_hash
+            FROM idempotency_keys k JOIN missions m ON m.id = k.mission_id
+            WHERE k.scope = %s AND k.key = %s
+            """,
+            (scope, key),
+        ).fetchone()
+        stored_hash = row.pop("stored_hash")
+        if stored_hash != request_hash:
+            raise IdempotencyConflict(key) from None
+        return Mission(**row), False
+

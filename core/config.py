@@ -27,6 +27,15 @@ class Settings(BaseSettings):
     task_lease_seconds: float = 30.0
     lease_heartbeat_seconds: float = 10.0
     reaper_interval_seconds: float = 10.0
+    # Retrying a failed attempt: wait min(cap, base * 2**(n-1)) seconds, half of it random.
+    retry_base_seconds: float = 2.0
+    retry_max_seconds: float = 60.0
+    # How often the sweeper publishes READY tasks that are due (a finished backoff, or a message
+    # that was lost), and how long a published message is trusted before it is published again.
+    sweep_interval_seconds: float = 2.0
+    ready_republish_seconds: float = 60.0
+    # Multiplies every agent's timeout_seconds (1.0 = as stored). Raise it for a slow local model.
+    task_timeout_scale: float = 1.0
 
     @model_validator(mode="after")
     def _heartbeat_inside_lease(self) -> "Settings":
@@ -35,8 +44,18 @@ class Settings(BaseSettings):
                 "LEASE_HEARTBEAT_SECONDS must be at most half of TASK_LEASE_SECONDS, "
                 "otherwise one late heartbeat expires a healthy worker's lease"
             )
-        if self.reaper_interval_seconds <= 0:
-            raise ValueError("REAPER_INTERVAL_SECONDS must be positive")
+        for name in (
+            "reaper_interval_seconds",
+            "retry_base_seconds",
+            "retry_max_seconds",
+            "sweep_interval_seconds",
+            "ready_republish_seconds",
+            "task_timeout_scale",
+        ):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name.upper()} must be positive")
+        if self.retry_max_seconds < self.retry_base_seconds:
+            raise ValueError("RETRY_MAX_SECONDS must not be smaller than RETRY_BASE_SECONDS")
         return self
 
     @property
