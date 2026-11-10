@@ -23,6 +23,7 @@ def main() -> None:
         stop=stop,
         reap_interval=settings.reaper_interval_seconds,
         sweep_interval=settings.sweep_interval_seconds,
+        mission_sweep_interval=settings.mission_sweep_interval_seconds,
     )
 
 

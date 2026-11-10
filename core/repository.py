@@ -204,11 +204,8 @@ def set_task_status(
             is_running,
         ),
     ).fetchone()
-    if row is not None:
-        if is_running:  # claimed: any delay is served and the message is consumed
-            conn.execute("DELETE FROM task_dispatch WHERE task_id = %s", (task_id,))
-        elif new_status == TaskStatus.READY:  # the caller is about to publish a message
-            _stamp_dispatch(conn, task_id, run_after_seconds=None, enqueued=True)
+    if row is not None and is_running:  # claimed: any delay is served and the message is consumed
+        conn.execute("DELETE FROM task_dispatch WHERE task_id = %s", (task_id,))
 
     if row is None:
         current = conn.execute(
@@ -395,6 +392,23 @@ def _stamp_dispatch(
     )
 
 
+def mark_enqueued(conn: psycopg.Connection, task_id: UUID) -> None:
+    """Record that a queue message for this READY task has just been published.
+
+    Called AFTER publishing. If the process dies between marking the task READY and getting here,
+    the task stays unstamped and the sweeper publishes it after a few seconds of grace. (Stamping
+    BEFORE publishing, as an earlier version did, made that crash window cost the whole
+    republish interval: a full minute.)
+    """
+    conn.execute(
+        """
+        INSERT INTO task_dispatch (task_id, enqueued_at) VALUES (%s, now())
+        ON CONFLICT (task_id) DO UPDATE SET enqueued_at = now()
+        """,
+        (task_id,),
+    )
+
+
 def get_task(conn: psycopg.Connection, task_id: UUID) -> Task | None:
     row = conn.execute("SELECT * FROM tasks WHERE id = %s", (task_id,)).fetchone()
     if row is None:
@@ -530,16 +544,21 @@ def schedule_retry(
 
 
 def claim_due_ready(
-    conn: psycopg.Connection, *, republish_after: float, limit: int = 100
+    conn: psycopg.Connection, *, republish_after: float, grace: float = 5.0, limit: int = 100
 ) -> list[tuple[UUID, UUID]]:
     """(mission id, task id) of READY tasks that are due and have no recent queue message, and
     stamp them `enqueued_at = now()` so that no other sweeper takes them this round.
 
-    Concurrent sweepers split the work (SKIP LOCKED) and never both publish the same task.
-    Stamping BEFORE publishing means a crash between the two costs one `republish_after` of
-    waiting (then the task is picked up again), never a lost task. A READY task with no
-    task_dispatch row at all (the scheduler crashed before writing one) counts as due with no
-    message, so it is found too.
+    A task that has a retry delay (run_after) is published the moment the delay is over. A task
+    with NO delay and no stamp is one whose own publisher may still be mid-way through publishing,
+    so it is given `grace` seconds first (measured from when it became READY); after that the
+    publisher is presumed dead. A stamped task is trusted for `republish_after` seconds.
+
+    Concurrent sweepers are serialized by an advisory lock (taken in its own statement, so the
+    claim gets a fresh READ COMMITTED snapshot afterwards). Here the sweeper stamps BEFORE
+    publishing (it is the only publisher of these tasks, so a crash between the two costs one
+    `republish_after`, never a lost task). A READY task with no task_dispatch row at all counts as
+    due with no message, so it is found too.
     """
     # Serialize concurrent sweepers. This must be a separate SQL statement
     # so the claim query gets a fresh READ COMMITTED snapshot after the lock.
@@ -553,6 +572,7 @@ def claim_due_ready(
             WHERE t.status = 'ready'
               AND (d.run_after IS NULL OR d.run_after <= now())
               AND (d.enqueued_at IS NULL OR d.enqueued_at <= now() - make_interval(secs => %s))
+              AND (d.run_after IS NOT NULL OR t.updated_at <= now() - make_interval(secs => %s))
             ORDER BY COALESCE(d.run_after, t.created_at)
             LIMIT %s
             FOR UPDATE OF t SKIP LOCKED
@@ -565,7 +585,7 @@ def claim_due_ready(
         )
         SELECT due.mission_id, due.id FROM due JOIN stamped ON stamped.task_id = due.id
         """,
-        (republish_after, limit),
+        (republish_after, grace, limit),
     ).fetchall()
     return [(r["mission_id"], r["id"]) for r in rows]
 
@@ -626,4 +646,66 @@ def create_mission_idempotent(
         if stored_hash != request_hash:
             raise IdempotencyConflict(key) from None
         return Mission(**row), False
+
+
+# ---------- missions that stopped making progress ----------
+
+
+def find_stalled_missions(
+    conn: psycopg.Connection, *, stale_seconds: float, limit: int = 50
+) -> list[UUID]:
+    """Running missions with nothing in flight and no activity for `stale_seconds`.
+
+    "Nothing in flight" = no task is ready or running (those are covered by the sweeper and the
+    reaper). A running mission in that state should have progressed: some event that would have
+    woken the scheduler was lost. Running the scheduler's pass for it is safe because the pass is
+    idempotent (it only acts on what the statuses say).
+    """
+    rows = conn.execute(
+        """
+        SELECT m.id FROM missions m
+        WHERE m.status = 'running'
+          AND NOT EXISTS (
+              SELECT 1 FROM tasks t WHERE t.mission_id = m.id AND t.status IN ('ready', 'running')
+          )
+          AND COALESCE(
+                (SELECT max(t.updated_at) FROM tasks t WHERE t.mission_id = m.id), m.updated_at
+              ) <= now() - make_interval(secs => %s)
+        ORDER BY m.updated_at
+        LIMIT %s
+        """,
+        (stale_seconds, limit),
+    ).fetchall()
+    return [r["id"] for r in rows]
+
+
+def fail_stale_planning(
+    conn: psycopg.Connection, *, stale_seconds: float, limit: int = 50
+) -> list[Mission]:
+    """Fail missions that have been pending or planning for longer than `stale_seconds`.
+
+    The planner runs as a background job inside the API process. If that process stops after the
+    mission was saved (a restart, a crash), nothing ever plans it and the mission would stay
+    `pending` forever. One guarded UPDATE: a planner that was merely slow and finishes later finds
+    the mission no longer `planning` and discards its plan (see run_planner).
+    """
+    rows = conn.execute(
+        """
+        UPDATE missions
+        SET status = 'failed', completed_at = now(), updated_at = now(),
+            error = 'planning never finished: the process that was planning it stopped (no progress for '
+                    || %s::text || ' s). Submit the objective again.'
+        WHERE id IN (
+            SELECT id FROM missions
+            WHERE status IN ('pending', 'planning')
+              AND updated_at <= now() - make_interval(secs => %s)
+            ORDER BY updated_at
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *
+        """,
+        (int(stale_seconds), stale_seconds, limit),
+    ).fetchall()
+    return [Mission(**r) for r in rows]
 

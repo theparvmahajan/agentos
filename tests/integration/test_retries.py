@@ -18,7 +18,13 @@ from core.state import InvalidTransition
 from core.sweeper import sweep_ready
 from core.tools import ToolRegistry
 from core.worker import Outcome, handle_task_message, run_worker
-from tests.integration.conftest import LEASE_AGENT, dispatch_of, make_due, wait_until
+from tests.integration.conftest import (
+    LEASE_AGENT,
+    age,
+    dispatch_of,
+    make_due,
+    wait_until,
+)
 
 SLOW = Backoff(base=10, cap=10)  # retries wait 5 to 10 s: long enough that nothing runs by accident
 FAST = Backoff(base=0.05, cap=0.1)
@@ -167,10 +173,15 @@ def test_a_stray_message_cannot_run_a_task_before_its_delay_is_over(
 
 def test_claiming_a_due_task_clears_its_dispatch_row(test_db_url, lease_mission):
     _, ids = lease_mission()
-    assert dispatch_of(test_db_url, ids["a"]) is not None  # stamped when it became READY
     with get_conn(test_db_url) as conn:
         repo.claim_task(conn, ids["a"], "w", 30)
-    assert dispatch_of(test_db_url, ids["a"]) is None
+    with get_conn(test_db_url) as conn:
+        repo.schedule_retry(conn, ids["a"], 1, error="x", delay_seconds=0.0)
+    assert dispatch_of(test_db_url, ids["a"]) is not None  # the retry's delay is recorded
+    make_due(test_db_url, ids["a"])
+    with get_conn(test_db_url) as conn:
+        repo.claim_task(conn, ids["a"], "w", 30)
+    assert dispatch_of(test_db_url, ids["a"]) is None  # claimed: nothing left to wait for
 
 
 # ---------- the whole loop: fail, wait, retry, succeed ----------
@@ -286,32 +297,64 @@ def test_the_timeout_comes_from_the_agent_scaled_by_the_setting(
 
 # ---------- the sweeper ----------
 
-def test_a_ready_task_whose_message_was_lost_is_published(test_db_url, queues, lease_mission):
-    _, ids = lease_mission()  # READY, stamped as enqueued, but no message was ever sent
-    assert sweep_ready(queues, database_url=test_db_url).published == ()  # a message is presumed to exist
+def test_a_ready_task_is_left_to_its_own_publisher_briefly_and_then_published(
+    test_db_url, queues, lease_mission
+):
+    """The scheduler marks a task READY and publishes a moment later. The sweeper must not jump in
+    during that moment (duplicate), but must not wait long either: if the scheduler died in
+    between, the task has no message and nobody else will ever send one."""
+    mission_id, ids = lease_mission()  # READY, never published, never stamped
+    assert sweep_ready(queues, database_url=test_db_url).published == ()  # still inside the grace
 
-    with get_conn(test_db_url) as conn:  # a minute later, still READY, still waiting
+    age(test_db_url, ids["a"])  # the publisher has had its chance
+    assert sweep_ready(queues, database_url=test_db_url).published == (ids["a"],)
+    [message] = queues.tasks.read("w")
+    assert message.fields == {"mission_id": str(mission_id), "task_id": str(ids["a"])}
+
+
+def test_a_crash_between_marking_ready_and_publishing_waits_for_the_grace_not_the_republish_interval(
+    test_db_url, queues, lease_mission
+):
+    """The regression found by failure injection. READY was once stamped as 'published' before the
+    publish happened, so a scheduler killed in that gap left a task that looked recently queued and
+    waited the whole republish interval (a minute) for the sweeper."""
+    _, ids = lease_mission(ready=False)
+    with get_conn(test_db_url) as conn:  # exactly what the scheduler does first, then it dies
+        repo.set_task_status(conn, ids["a"], TaskStatus.READY)
+    assert dispatch_of(test_db_url, ids["a"]) is None  # marking READY must not claim "published"
+
+    age(test_db_url, ids["a"], seconds=10)  # past the grace (5 s), far short of the interval
+    report = sweep_ready(queues, republish_after=3600, grace=5, database_url=test_db_url)
+    assert report.published == (ids["a"],)  # recovered at once, however long the interval is
+
+
+def test_a_stamped_task_is_trusted_until_the_republish_interval_passes(
+    test_db_url, queues, lease_mission
+):
+    _, ids = lease_mission()
+    age(test_db_url, ids["a"])
+    with get_conn(test_db_url) as conn:
+        repo.mark_enqueued(conn, ids["a"])  # a message was published a moment ago
+    assert sweep_ready(queues, database_url=test_db_url).published == ()
+
+    with get_conn(test_db_url) as conn:  # two minutes on, the message has evidently vanished
         conn.execute(
             "UPDATE task_dispatch SET enqueued_at = now() - interval '2 minutes' WHERE task_id = %s",
             (ids["a"],),
         )
     assert sweep_ready(queues, database_url=test_db_url).published == (ids["a"],)
-    [message] = queues.tasks.read("w")
-    assert message.fields["task_id"] == str(ids["a"])
 
 
 def test_a_ready_task_with_no_dispatch_row_at_all_is_found(test_db_url, queues, lease_mission):
     _, ids = lease_mission()
-    with get_conn(test_db_url) as conn:  # as if the process died before writing the row
-        conn.execute("DELETE FROM task_dispatch WHERE task_id = %s", (ids["a"],))
+    assert dispatch_of(test_db_url, ids["a"]) is None  # as if the process died before any bookkeeping
+    age(test_db_url, ids["a"])
     assert sweep_ready(queues, database_url=test_db_url).published == (ids["a"],)
 
 
 def test_a_published_task_is_not_published_again_every_pass(test_db_url, queues, lease_mission):
     _, ids = lease_mission()
-    make_due(test_db_url, ids["a"])
-    with get_conn(test_db_url) as conn:
-        conn.execute("UPDATE task_dispatch SET enqueued_at = NULL WHERE task_id = %s", (ids["a"],))
+    age(test_db_url, ids["a"])
 
     assert sweep_ready(queues, database_url=test_db_url).published == (ids["a"],)
     assert sweep_ready(queues, database_url=test_db_url).published == ()  # stamped: not again
@@ -338,30 +381,36 @@ def test_the_sweeper_ignores_tasks_that_are_waiting_or_not_ready(test_db_url, qu
 def test_the_scheduler_stamps_what_it_publishes_so_the_sweeper_does_not_double_it(
     test_db_url, queues, lease_mission
 ):
-    mission_id, _ = lease_mission(ready=False)
+    mission_id, ids = lease_mission(ready=False)
     schedule_mission(mission_id, queues, database_url=test_db_url)
     assert queues.tasks.length() == 1
+    # Well past the sweeper's grace period: from now on only the scheduler's stamp keeps the
+    # sweeper away (without it this would publish a second copy).
+    age(test_db_url, ids["a"])
     assert sweep_ready(queues, database_url=test_db_url).published == ()
     assert queues.tasks.length() == 1
 
 
 @pytest.mark.parametrize("round_", range(15))
-def test_two_sweepers_racing_publish_each_task_once(test_db_url, queues, lease_mission, round_):
+def test_concurrent_sweepers_publish_each_task_once(test_db_url, queues, lease_mission, round_):
+    """Four sweepers at once. This race only shows with real parallelism (a single-CPU machine
+    hides it; CI found it): without the lock in claim_due_ready, a sweeper whose statement began
+    before another committed could stamp and publish the same task again."""
     _, ids = lease_mission(keys=("a", "b", "c", "d"))
-    with get_conn(test_db_url) as conn:
-        conn.execute("DELETE FROM task_dispatch WHERE task_id = ANY(%s)", (list(ids.values()),))
-    barrier = threading.Barrier(2)
+    for task_id in ids.values():
+        age(test_db_url, task_id)
+    barrier = threading.Barrier(4)
     reports = []
 
     def go():
         barrier.wait()
         reports.append(sweep_ready(queues, database_url=test_db_url))
 
-    threads = [threading.Thread(target=go) for _ in range(2)]
+    threads = [threading.Thread(target=go) for _ in range(4)]
     for t in threads:
         t.start()
     for t in threads:
-        t.join(10)
+        t.join(15)
 
     published = [task for r in reports for task in r.published]
     assert sorted(published) == sorted(ids.values())  # every task, none twice
@@ -370,8 +419,7 @@ def test_two_sweepers_racing_publish_each_task_once(test_db_url, queues, lease_m
 
 def test_the_scheduler_loop_runs_the_sweeper(test_db_url, queues, lease_mission):
     _, ids = lease_mission()
-    with get_conn(test_db_url) as conn:
-        conn.execute("DELETE FROM task_dispatch WHERE task_id = %s", (ids["a"],))  # message "lost"
+    age(test_db_url, ids["a"])  # READY for a minute and never published: the message was "lost"
     stop = threading.Event()
     thread = threading.Thread(
         target=run_scheduler,

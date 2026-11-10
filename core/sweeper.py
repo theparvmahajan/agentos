@@ -34,14 +34,16 @@ def sweep_ready(
     queues: Queues,
     *,
     republish_after: float | None = None,
+    grace: float | None = None,
     database_url: str | None = None,
     limit: int = 100,
 ) -> SweepReport:
     republish_after = (
         settings.ready_republish_seconds if republish_after is None else republish_after
     )
+    grace = settings.ready_grace_seconds if grace is None else grace
     with get_conn(database_url) as conn:
-        due = repo.claim_due_ready(conn, republish_after=republish_after, limit=limit)
+        due = repo.claim_due_ready(conn, republish_after=republish_after, grace=grace, limit=limit)
     # Committed (and stamped) first, published second.
     for mission_id, task_id in due:
         queues.publish_task(mission_id, task_id)
