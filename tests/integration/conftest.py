@@ -18,6 +18,16 @@ def make_due(url, task_id):
         )
 
 
+def age(url, task_id, seconds=60):
+    """Make a READY task look like it became READY `seconds` ago, so the sweeper's short grace
+    period for its own publisher is over."""
+    with get_conn(url) as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = now() - make_interval(secs => %s) WHERE id = %s",
+            (seconds, task_id),
+        )
+
+
 def dispatch_of(url, task_id):
     """The task's task_dispatch row (run_after, enqueued_at), or None."""
     with get_conn(url) as conn:

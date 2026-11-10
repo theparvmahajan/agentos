@@ -67,3 +67,20 @@ def test_the_retry_cap_cannot_be_below_the_base():
     with pytest.raises(ValidationError, match="RETRY_MAX_SECONDS"):
         Settings(_env_file=None, retry_base_seconds=10, retry_max_seconds=5)
 
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "redis_socket_timeout_seconds",
+        "redis_connect_timeout_seconds",
+        "db_connect_timeout_seconds",
+        "db_network_timeout_seconds",
+        "mission_sweep_interval_seconds",
+        "mission_stale_seconds",
+        "planning_stale_seconds",
+    ],
+)
+def test_connection_and_watchdog_settings_must_be_positive(name):
+    with pytest.raises(ValidationError, match=name.upper()):
+        Settings(_env_file=None, **{name: 0})
+

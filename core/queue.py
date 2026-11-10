@@ -2,7 +2,9 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import redis
+from redis.backoff import NoBackoff
 from redis.exceptions import ResponseError
+from redis.retry import Retry
 
 from core.config import settings
 
@@ -98,8 +100,26 @@ class Queues:
         return self.events.publish(fields)
 
 
+def make_redis(url: str | None = None, *, socket_timeout: float | None = None) -> redis.Redis:
+    """A Redis client that fails fast instead of waiting forever.
+
+    - socket_timeout: a call that gets no answer raises after this long. Without it a network
+      partition (no error, only silence) hangs the caller indefinitely.
+    - no client-side retries: redis-py would otherwise retry a failed call several times with
+      growing pauses (measured: one call into a black hole took 14 s with a 1 s timeout). Our loops
+      already retry on their own schedule, and a hidden second retry layer only delays them.
+    """
+    return redis.Redis.from_url(
+        url or settings.redis_url,
+        decode_responses=True,
+        socket_timeout=socket_timeout or settings.redis_socket_timeout_seconds,
+        socket_connect_timeout=settings.redis_connect_timeout_seconds,
+        retry=Retry(NoBackoff(), 0),
+    )
+
+
 def get_redis() -> redis.Redis:
-    return redis.Redis.from_url(settings.redis_url, decode_responses=True)
+    return make_redis()
 
 
 def build_queues(client: redis.Redis | None = None, prefix: str | None = None) -> Queues:

@@ -34,8 +34,28 @@ class Settings(BaseSettings):
     # that was lost), and how long a published message is trusted before it is published again.
     sweep_interval_seconds: float = 2.0
     ready_republish_seconds: float = 60.0
+    # A READY task that nobody has stamped as published yet is left alone this long before the
+    # sweeper publishes it: its own publisher (the scheduler) is probably about to. After that, the
+    # publisher is presumed dead and the sweeper steps in.
+    ready_grace_seconds: float = 5.0
     # Multiplies every agent's timeout_seconds (1.0 = as stored). Raise it for a slow local model.
     task_timeout_scale: float = 1.0
+    # Connections must never wait forever: a network partition gives no error, only silence.
+    # The Redis read timeout must stay above the longest server-side block (a few seconds).
+    redis_socket_timeout_seconds: float = 10.0
+    redis_connect_timeout_seconds: float = 5.0
+    db_connect_timeout_seconds: float = 5.0
+    # If the network under an open database connection silently dies, the operating system would
+    # wait many minutes before giving up. Data left unacknowledged for this long closes it instead.
+    db_network_timeout_seconds: float = 30.0
+    # How often the scheduler looks for missions that stopped making progress (a lost event, a
+    # mission whose planner never started), how long a mission must be quiet to count as stalled,
+    # and how long a mission may stay pending/planning before it is declared failed. The last must
+    # exceed the slowest plausible planning (an LLM call, plus one repair, each up to
+    # LLM_TIMEOUT_SECONDS).
+    mission_sweep_interval_seconds: float = 15.0
+    mission_stale_seconds: float = 30.0
+    planning_stale_seconds: float = 900.0
 
     @model_validator(mode="after")
     def _heartbeat_inside_lease(self) -> "Settings":
@@ -50,7 +70,15 @@ class Settings(BaseSettings):
             "retry_max_seconds",
             "sweep_interval_seconds",
             "ready_republish_seconds",
+            "ready_grace_seconds",
             "task_timeout_scale",
+            "redis_socket_timeout_seconds",
+            "redis_connect_timeout_seconds",
+            "db_connect_timeout_seconds",
+            "db_network_timeout_seconds",
+            "mission_sweep_interval_seconds",
+            "mission_stale_seconds",
+            "planning_stale_seconds",
         ):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name.upper()} must be positive")
