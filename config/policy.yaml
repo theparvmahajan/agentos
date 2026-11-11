@@ -1,0 +1,51 @@
+# The tool policy: what an agent may do with the capabilities it holds.
+#
+# A tool call must pass TWO gates, both deterministic (no LLM involved):
+#   1. the agent holds the tool's capability   (agents.capabilities in the database)
+#   2. this policy allows that capability      (this file)
+#
+# Rules are keyed by CAPABILITY and may use * as a wildcard (database.* matches database.read).
+# When several rules match, the MOST RESTRICTIVE wins (deny > approval > allow) and the highest
+# risk is reported, so the order of the rules never matters.
+#
+# Anything not matched by a rule falls back to `default`. Keep it `deny`: a new capability then
+# does nothing until somebody decides to allow it.
+version: 1
+default: deny
+
+capabilities:
+  web.search:
+    effect: allow
+    risk: low
+    max_calls_per_task: 10
+
+  code.execute:
+    effect: allow
+    risk: medium
+    max_calls_per_task: 12      # runs in a locked-down container (core/tools/python_exec.py)
+
+  database.read:
+    effect: allow
+    risk: medium
+    max_calls_per_task: 15      # also passes the SQL guardrail and a read-only transaction
+
+  # Not used by any tool yet. They are written down so the first tool that needs one meets a
+  # decision that was made calmly, in advance.
+  database.write:
+    effect: approval
+    risk: high
+    deny_when_tainted: true
+  database.delete:
+    effect: deny
+    risk: critical
+  email.send:
+    effect: approval
+    risk: high
+    deny_when_tainted: true
+  shell.execute:
+    effect: deny
+    risk: critical
+
+# Per-agent restrictions. They can only take capabilities away, never add one: what an agent
+# holds is still decided by its row in the database.
+agents: {}

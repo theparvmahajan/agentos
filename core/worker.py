@@ -16,7 +16,7 @@ from core.queue import Message, Queues
 from core.retry import Backoff, TaskTimeout, is_retryable
 from core.runner import DependencyOutput, Runner
 from core.state import TASK_TERMINAL, InvalidTransition
-from core.tools import ToolRegistry
+from core.tools import ToolContext, ToolRegistry
 
 log = logging.getLogger(__name__)
 
@@ -243,6 +243,21 @@ def handle_task_message(
             DependencyOutput(by_id[d].key, by_id[d].instruction, by_id[d].output or "")
             for d in task.depends_on
         ]
+        # The runner gets a view of the tools that knows which task and attempt is calling, so
+        # every tool decision lands in the audit trail against the right task. The agent code
+        # cannot choose or alter this: it is built here, from the claimed row.
+        task_tools = (
+            tools.bind(
+                ToolContext(
+                    task_id=task.id,
+                    mission_id=task.mission_id,
+                    tenant_id=task.tenant_id,
+                    attempt=attempt,
+                )
+            )
+            if tools is not None
+            else None
+        )
         with LeaseKeeper(
             task_id,
             consumer,
@@ -253,7 +268,7 @@ def handle_task_message(
         ):
             result = _run_with_timeout(
                 lambda: runner(
-                    agent, task.instruction, dependencies, tools=tools, provider=provider
+                    agent, task.instruction, dependencies, tools=task_tools, provider=provider
                 ),
                 timeout,
             )

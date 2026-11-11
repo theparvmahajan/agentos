@@ -6,7 +6,7 @@ import threading
 from agents import build_default_runners
 from core.logging_setup import configure_logging
 from core.queue import build_queues
-from core.tools import build_default_registry
+from core.tools import build_runtime_registry
 from core.worker import run_worker
 
 
@@ -23,7 +23,7 @@ def main() -> None:
 
     queues = build_queues()
     runners = build_default_runners()
-    tools = build_default_registry()
+    tools = build_runtime_registry()  # policy + audit trail: a bad policy file stops the worker here
 
     threads = [
         threading.Thread(
