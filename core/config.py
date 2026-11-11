@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     # (a plain subprocess on THIS machine, no isolation; only for when you accept that risk).
     code_exec_backend: str = "docker"
     code_exec_image: str = "python:3.12-slim"
+    # The tool policy (YAML): which capabilities agents may use, with limits. A relative path starts
+    # at the project root. A missing or invalid file stops the worker from starting.
+    policy_file: str = "config/policy.yaml"
     # Browser origins allowed to call the API (comma separated). The dashboard's address.
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     # A running task is held under a lease that its worker renews (a "heartbeat"). If the worker

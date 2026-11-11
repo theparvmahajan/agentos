@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -22,8 +23,34 @@ class ToolPermissionError(ToolError):
     pass
 
 
+class ToolDenied(ToolPermissionError):
+    """The policy refused this call. Never retried: running it again cannot change the answer."""
+
+    def __init__(self, message: str, *, rule: str = ""):
+        super().__init__(message)
+        self.rule = rule
+
+
+class ApprovalRequired(ToolDenied):
+    """The policy wants a human to approve this call. Until milestone M6 (human-in-the-loop)
+    exists there is nobody to ask, so the call is refused. It fails closed, never open."""
+
+
 class ToolInputError(ToolError):
     pass
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """Who a tool call is for. The worker binds one per task attempt (ToolRegistry.bind), so the
+    audit trail can say which task and mission a call belonged to, without the agent code (or the
+    model) ever being able to choose or change it."""
+
+    task_id: UUID
+    mission_id: UUID
+    tenant_id: UUID | None = None
+    attempt: int | None = None
+    tainted: bool = False  # the task already depends on untrusted content
 
 
 @dataclass(frozen=True)

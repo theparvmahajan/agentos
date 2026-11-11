@@ -9,6 +9,7 @@ COPY agents ./agents
 COPY core ./core
 COPY services ./services
 COPY scripts ./scripts
+COPY config ./config
 COPY infrastructure/db ./infrastructure/db
 RUN useradd --create-home --uid 10001 agentos
 USER agentos
