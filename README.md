@@ -141,6 +141,3 @@ mission. Full reference with message formats and close codes: [docs/API.md](docs
 - `CODE_EXEC_BACKEND=docker` is the default. `CODE_EXEC_BACKEND=local` runs agent code on your own
   machine with no isolation and exists only as an explicit opt-in.
 - Containers share the host kernel: strong isolation for a dev machine, not for hostile strangers.
-
-## What works / what's planned
-See the roadmap. Updated at the end of every milestone.
