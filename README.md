@@ -8,7 +8,7 @@ tool call, runs agent-written code in a locked-down container, and streams progr
 
 **Status:** v1 (milestones M0-M3). Planning, DAG scheduling, distributed workers, three agents,
 sandboxed code execution, a live dashboard, and a one-command container deployment. Reliability
-(M4) and security (M5) come next; today the API has no login of its own, so the deployment puts
+(M4) and security (M5) completed; today the API has no login of its own, so the deployment puts
 one in front of every write. See [docs/ROADMAP.md](docs/ROADMAP.md), [docs/API.md](docs/API.md),
 [docs/RELIABILITY.md](docs/RELIABILITY.md) (what survives a crash, and what does not), [docs/FAILURE_TESTING.md](docs/FAILURE_TESTING.md) (how it is tested), [docs/POSTMORTEM.md](docs/POSTMORTEM.md), [docs/DEPLOY.md](docs/DEPLOY.md) and [frontend/README.md](frontend/README.md).
 
