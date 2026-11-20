@@ -6,7 +6,7 @@ tool call, runs agent-written code in a locked-down container, and streams progr
 
 > The model decides what it wants to do; the runtime decides whether it can.
 
-**Status:** v1 (milestones M0-M3). Planning, DAG scheduling, distributed workers, three agents,
+**Status:** v1 (milestones M0-M3) completed. Planning, DAG scheduling, distributed workers, three agents,
 sandboxed code execution, a live dashboard, and a one-command container deployment. Reliability
 (M4) and security (M5) completed; today the API has no login of its own, so the deployment puts
 one in front of every write. See [docs/ROADMAP.md](docs/ROADMAP.md), [docs/API.md](docs/API.md),
